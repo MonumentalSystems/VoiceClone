@@ -1,0 +1,3819 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Voice Clone TTS</title>
+<style>
+  :root {
+    --bg: #1a1a2e;
+    --surface: #16213e;
+    --surface2: #0f3460;
+    --accent: #e94560;
+    --accent2: #533483;
+    --text: #eee;
+    --text-dim: #999;
+    --success: #4ade80;
+    --warn: #fbbf24;
+    --err: #f87171;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 2rem 1rem;
+  }
+  h1 {
+    font-size: 1.8rem;
+    margin-bottom: 0.3rem;
+    background: linear-gradient(135deg, var(--accent), var(--accent2));
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+  }
+  .subtitle { color: var(--text-dim); font-size: 0.85rem; margin-bottom: 1.5rem; }
+  .container { width: 100%; max-width: 800px; }
+
+  /* Status bar */
+  .status-bar {
+    display: flex; align-items: center; gap: 0.5rem;
+    padding: 0.5rem 1rem; background: var(--surface);
+    border-radius: 8px; margin-bottom: 1rem;
+    font-size: 0.8rem; color: var(--text-dim);
+  }
+  .status-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--err); }
+  .status-dot.ready { background: var(--success); }
+  .status-dot.loading { background: var(--warn); animation: pulse 1s infinite; }
+  @keyframes pulse { 50% { opacity: 0.4; } }
+
+  /* Text input */
+  .input-section { margin-bottom: 1rem; }
+  textarea {
+    width: 100%; height: 200px; padding: 1rem;
+    background: var(--surface); border: 1px solid var(--surface2);
+    border-radius: 8px; color: var(--text); font-size: 0.95rem;
+    font-family: inherit; resize: vertical; outline: none;
+    transition: border-color 0.2s;
+  }
+  textarea:focus { border-color: var(--accent); }
+  textarea::placeholder { color: var(--text-dim); }
+  .input-footer { display: flex; justify-content: space-between; align-items: center; margin-top: 0.5rem; }
+  .char-count { font-size: 0.8rem; color: var(--text-dim); }
+
+  /* Buttons */
+  .btn {
+    padding: 0.7rem 1.8rem; border: none; border-radius: 8px;
+    font-size: 0.95rem; font-weight: 600; cursor: pointer; transition: all 0.2s;
+  }
+  .btn-primary { background: linear-gradient(135deg, var(--accent), var(--accent2)); color: white; }
+  .btn-primary:hover { transform: translateY(-1px); box-shadow: 0 4px 15px rgba(233,69,96,0.3); }
+  .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; transform: none; box-shadow: none; }
+  .btn-stop { background: var(--surface2); color: var(--err); margin-left: 0.5rem; }
+  .btn-stop:hover { background: var(--err); color: white; }
+  .btn-sm { padding: 0.4rem 1rem; font-size: 0.8rem; border-radius: 6px; }
+
+  /* Progress */
+  .progress-section { margin-bottom: 1rem; display: none; }
+  .progress-section.active { display: block; }
+  .progress-bar-container { width: 100%; height: 6px; background: var(--surface); border-radius: 3px; overflow: hidden; margin-bottom: 0.5rem; }
+  .progress-bar { height: 100%; background: linear-gradient(90deg, var(--accent), var(--accent2)); border-radius: 3px; transition: width 0.3s; width: 0%; }
+  .progress-stats { display: flex; justify-content: space-between; font-size: 0.8rem; color: var(--text-dim); }
+
+  /* Player */
+  .player-section { background: var(--surface); border-radius: 12px; padding: 1.2rem; margin-bottom: 1rem; display: none; }
+  .player-section.active { display: block; }
+
+  /* Transport controls */
+  .transport {
+    display: flex; align-items: center; justify-content: center;
+    gap: 0.6rem; margin-bottom: 1rem;
+  }
+  .transport-btn {
+    width: 36px; height: 36px; border-radius: 50%; border: none;
+    background: var(--surface2); color: var(--text); font-size: 0.9rem;
+    cursor: pointer; display: flex; align-items: center; justify-content: center;
+    transition: all 0.15s;
+  }
+  .transport-btn:hover { background: var(--accent2); }
+  .transport-btn:disabled { opacity: 0.3; cursor: not-allowed; }
+  .transport-btn:disabled:hover { background: var(--surface2); }
+  .transport-btn.play-main {
+    width: 48px; height: 48px; font-size: 1.2rem;
+    background: var(--accent); color: white;
+  }
+  .transport-btn.play-main:hover { transform: scale(1.08); }
+  .transport-btn.play-main.ready-pulse {
+    animation: playPulse 1.5s infinite;
+    box-shadow: 0 0 15px rgba(233,69,96,0.5);
+  }
+  @keyframes playPulse { 50% { box-shadow: 0 0 25px rgba(233,69,96,0.8); } }
+
+  /* Speed control */
+  .speed-control {
+    display: flex; align-items: center; gap: 0.4rem;
+    font-size: 0.75rem; color: var(--text-dim); margin-left: 0.8rem;
+  }
+  .speed-control label { white-space: nowrap; }
+  .speed-control input[type="range"] { width: 90px; cursor: pointer; accent-color: var(--accent); }
+  .speed-val { min-width: 3.2em; text-align: right; color: var(--text); }
+
+  /* Waveform canvas */
+  .waveform-wrap {
+    position: relative; width: 100%; height: 80px;
+    background: var(--bg); border-radius: 6px; overflow: hidden;
+    cursor: pointer; margin-bottom: 0.3rem;
+  }
+  .waveform-wrap canvas { width: 100%; height: 100%; display: block; }
+  .waveform-playhead {
+    position: absolute; top: 0; bottom: 0; width: 2px;
+    background: white; pointer-events: none; left: 0;
+    box-shadow: 0 0 6px rgba(255,255,255,0.5);
+    transition: left 0.08s linear;
+  }
+  .waveform-hover {
+    position: absolute; top: 0; bottom: 0; width: 1px;
+    background: rgba(255,255,255,0.25); pointer-events: none;
+    display: none;
+  }
+  .waveform-tooltip {
+    position: absolute; top: -22px; transform: translateX(-50%);
+    background: var(--surface); color: var(--text-dim); font-size: 0.7rem;
+    padding: 2px 6px; border-radius: 4px; pointer-events: none;
+    display: none; white-space: nowrap;
+  }
+
+  .time-display {
+    display: flex; justify-content: space-between;
+    font-size: 0.75rem; color: var(--text-dim);
+    font-variant-numeric: tabular-nums;
+    margin-bottom: 0.4rem;
+  }
+
+  /* Now playing text */
+  .now-playing {
+    font-size: 0.78rem; color: var(--text-dim);
+    text-align: center; min-height: 1.2em;
+    margin-bottom: 0.5rem; padding: 0.4rem 0.8rem;
+    font-style: italic; line-height: 1.5;
+    background: var(--bg); border-radius: 6px;
+    max-height: 6em; overflow-y: auto;
+  }
+
+  /* Buffer indicator */
+  .buffer-indicator {
+    display: flex; align-items: center; gap: 0.5rem;
+    font-size: 0.78rem; color: var(--text-dim);
+  }
+  .buffer-bar { flex: 1; height: 4px; background: var(--bg); border-radius: 2px; overflow: hidden; }
+  .buffer-fill { height: 100%; background: var(--success); border-radius: 2px; transition: width 0.3s; }
+
+  /* Log */
+  .log-section {
+    background: var(--surface); border-radius: 12px; padding: 1rem;
+    max-height: 250px; overflow-y: auto; display: none;
+  }
+  .log-section.active { display: block; }
+  .log-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem; }
+  .log-title { font-weight: 600; font-size: 0.85rem; }
+  .log-entry {
+    font-size: 0.78rem; padding: 0.3rem 0;
+    border-bottom: 1px solid var(--bg);
+    display: flex; gap: 0.6rem; align-items: baseline;
+    cursor: pointer; transition: background 0.15s; border-radius: 4px;
+  }
+  .log-entry:hover { background: var(--surface2); }
+  .log-entry:last-child { border: none; }
+  .log-idx { color: var(--accent); font-weight: 600; min-width: 3rem; }
+  .log-text { color: var(--text-dim); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .log-stats { color: var(--success); white-space: nowrap; }
+  .log-stats.fail { color: var(--err); }
+  .log-regen-badge {
+    font-size: 0.65rem; font-weight: 600; padding: 0.1rem 0.4rem;
+    border-radius: 3px; white-space: nowrap;
+  }
+  .log-regen-badge.queued { background: var(--accent2); color: var(--text); }
+  .log-regen-badge.active { background: var(--warn); color: #000; animation: pulse 1s infinite; }
+  .log-regen-badge.done { background: var(--success); color: #000; }
+  .log-regen-badge.pending { background: var(--surface2); color: var(--warn); border: 1px solid var(--warn); }
+  .log-regen-badge.generating { background: var(--warn); color: #000; animation: pulse 1s infinite; }
+  .log-entry.deleted {
+    opacity: 0.5; text-decoration: line-through;
+    background: rgba(248,113,113,0.08); border-left: 2px solid var(--err);
+  }
+  .log-entry.deleted .log-idx { color: var(--err); }
+  .log-entry.deleted .log-stats { color: var(--err); }
+
+  /* Tuning panel */
+  .tuning-section {
+    background: var(--surface); border-radius: 12px; padding: 0.8rem 1rem;
+    margin-bottom: 1rem;
+  }
+  .tuning-header {
+    display: flex; justify-content: space-between; align-items: center;
+    cursor: pointer; user-select: none;
+  }
+  .tuning-header span { font-weight: 600; font-size: 0.85rem; }
+  .tuning-toggle { font-size: 0.75rem; color: var(--text-dim); }
+  .tuning-body { display: none; padding-top: 0.8rem; }
+  .tuning-body.open { display: block; }
+  .tuning-row {
+    display: flex; align-items: center; gap: 0.8rem;
+    margin-bottom: 0.6rem; font-size: 0.8rem;
+  }
+  .tuning-row label { min-width: 80px; color: var(--text-dim); }
+  .tuning-row input[type="range"] {
+    flex: 1; accent-color: var(--accent); height: 4px;
+  }
+  .tuning-row .tuning-val {
+    min-width: 36px; text-align: right; font-variant-numeric: tabular-nums;
+    color: var(--text); font-weight: 600;
+  }
+  .tuning-row .tuning-hint {
+    font-size: 0.7rem; color: var(--text-dim); min-width: 90px;
+  }
+  .tuning-row input[type="checkbox"] {
+    accent-color: var(--accent); width: 16px; height: 16px; cursor: pointer;
+  }
+
+  /* Voice (reference) upload card */
+  .voice-section {
+    background: var(--surface); border-radius: 12px; padding: 0.8rem 1rem;
+    margin-bottom: 1rem;
+  }
+  .voice-header {
+    display: flex; justify-content: space-between; align-items: center;
+    cursor: pointer; user-select: none;
+  }
+  .voice-header span.voice-title { font-weight: 600; font-size: 0.85rem; }
+  .voice-toggle { font-size: 0.75rem; color: var(--text-dim); }
+  .voice-body { display: none; padding-top: 0.8rem; }
+  .voice-body.open { display: block; }
+  .voice-active {
+    font-size: 0.75rem; color: var(--text-dim);
+    margin-right: 0.6rem; white-space: nowrap;
+    overflow: hidden; text-overflow: ellipsis; max-width: 60%;
+  }
+  .voice-active b { color: var(--text); font-weight: 600; }
+  .voice-row {
+    display: flex; align-items: center; gap: 0.6rem;
+    margin-bottom: 0.6rem; font-size: 0.8rem; flex-wrap: wrap;
+  }
+  .voice-row label { color: var(--text-dim); min-width: 80px; }
+  .voice-row input[type="file"] { flex: 1; color: var(--text-dim); font-size: 0.78rem; }
+  .voice-row textarea {
+    flex: 1; min-width: 240px; min-height: 56px; padding: 0.4rem 0.6rem;
+    background: var(--surface2); color: var(--text);
+    border: 1px solid var(--surface2); border-radius: 6px;
+    font-size: 0.8rem; resize: vertical; font-family: inherit;
+  }
+  .voice-row textarea:focus { outline: none; border-color: var(--accent); }
+  .voice-status {
+    font-size: 0.75rem; color: var(--text-dim);
+    margin-top: 0.3rem; min-height: 1em;
+  }
+  .voice-status.ok { color: var(--success); }
+  .voice-status.err { color: var(--accent); }
+
+  /* Resume bar */
+  .resume-bar {
+    display: flex; align-items: center; gap: 0.8rem;
+    padding: 0.5rem 1rem; background: var(--surface);
+    border-radius: 8px; margin-bottom: 1rem;
+    border-left: 3px solid var(--warn);
+  }
+  .resume-bar span { font-size: 0.82rem; color: var(--warn); flex: 1; }
+
+  /* Download */
+  .download-section { margin-top: 1rem; display: none; text-align: center; }
+  .download-section.active { display: block; }
+
+  /* Session management */
+  .session-bar {
+    display: flex; align-items: center; gap: 0.5rem;
+    padding: 0.4rem 0.8rem; background: var(--surface);
+    border-radius: 8px; margin-bottom: 1rem;
+    font-size: 0.8rem;
+  }
+  .session-name {
+    flex: 1; color: var(--text); font-weight: 600;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .session-saved {
+    color: var(--success); font-size: 0.7rem;
+    opacity: 0; transition: opacity 0.3s;
+  }
+  .session-saved.visible { opacity: 1; }
+  .session-btn {
+    padding: 0.25rem 0.6rem; border: 1px solid var(--surface2);
+    border-radius: 4px; background: transparent; color: var(--text-dim);
+    cursor: pointer; font-size: 0.72rem; transition: all 0.15s;
+  }
+  .session-btn:hover { border-color: var(--accent); color: var(--text); }
+
+  /* Session modal */
+  .session-modal-overlay {
+    display: none; position: fixed; inset: 0;
+    background: rgba(0,0,0,0.7); z-index: 200;
+    align-items: center; justify-content: center;
+  }
+  .session-modal-overlay.open { display: flex; }
+  .session-modal {
+    background: var(--surface); border-radius: 12px;
+    padding: 1.2rem; width: 90%; max-width: 500px;
+    max-height: 70vh; overflow-y: auto;
+    box-shadow: 0 20px 60px rgba(0,0,0,0.5);
+  }
+  .session-modal h3 {
+    font-size: 0.95rem; margin-bottom: 0.8rem;
+    display: flex; justify-content: space-between; align-items: center;
+  }
+  .session-list { list-style: none; }
+  .session-list-item {
+    display: flex; align-items: center; gap: 0.6rem;
+    padding: 0.5rem; border-radius: 6px; cursor: pointer;
+    transition: background 0.15s; font-size: 0.82rem;
+    border-bottom: 1px solid var(--bg);
+  }
+  .session-list-item:hover { background: var(--surface2); }
+  .session-list-item .sli-name { flex: 1; font-weight: 600; }
+  .session-list-item .sli-meta { color: var(--text-dim); font-size: 0.72rem; }
+  .session-list-item .sli-delete {
+    background: transparent; border: none; color: var(--err);
+    cursor: pointer; font-size: 0.85rem; padding: 0.2rem 0.4rem;
+    border-radius: 4px; opacity: 0.5;
+  }
+  .session-list-item .sli-delete:hover { opacity: 1; background: rgba(248,113,113,0.15); }
+  .session-empty { color: var(--text-dim); font-size: 0.82rem; padding: 1rem; text-align: center; }
+  .session-modal-actions {
+    display: flex; gap: 0.5rem; margin-top: 0.8rem;
+    border-top: 1px solid var(--bg); padding-top: 0.8rem;
+  }
+  .session-modal input[type="text"] {
+    flex: 1; padding: 0.4rem 0.6rem; background: var(--bg);
+    border: 1px solid var(--surface2); border-radius: 6px;
+    color: var(--text); font-size: 0.82rem; outline: none;
+  }
+  .session-modal input[type="text"]:focus { border-color: var(--accent); }
+
+  /* Inspector modal */
+  .inspector-overlay {
+    display: none; position: fixed; inset: 0;
+    background: rgba(0,0,0,0.7); z-index: 100;
+    align-items: center; justify-content: center;
+  }
+  .inspector-overlay.open { display: flex; }
+  .inspector-modal {
+    background: var(--surface); border-radius: 12px;
+    padding: 1.2rem; width: 90%; max-width: 700px;
+    max-height: 80vh; overflow-y: auto;
+    box-shadow: 0 20px 60px rgba(0,0,0,0.5);
+  }
+  .inspector-header {
+    display: flex; justify-content: space-between; align-items: center;
+    margin-bottom: 0.8rem;
+  }
+  .inspector-header h3 { font-size: 0.95rem; font-weight: 600; }
+  .inspector-close {
+    background: var(--surface2); border: none; color: var(--text-dim);
+    width: 28px; height: 28px; border-radius: 50%; font-size: 1rem;
+    cursor: pointer; display: flex; align-items: center; justify-content: center;
+  }
+  .inspector-close:hover { background: var(--err); color: white; }
+  .inspector-text {
+    font-size: 0.78rem; color: var(--text-dim); font-style: italic;
+    margin-bottom: 0.8rem; padding: 0.4rem 0.6rem;
+    background: var(--bg); border-radius: 6px; line-height: 1.5;
+    width: 100%; border: 1px solid transparent; font-family: inherit;
+    resize: vertical; min-height: 2em; outline: none;
+    transition: border-color 0.2s;
+  }
+  .inspector-text:focus { border-color: var(--accent); font-style: normal; color: var(--text); }
+  .inspector-info {
+    font-size: 0.78rem; color: var(--text-dim); margin-bottom: 0.8rem;
+    display: flex; gap: 1rem; flex-wrap: wrap;
+  }
+  .inspector-info .cut-label { color: var(--warn); }
+  .inspector-waveform {
+    position: relative; width: 100%; height: 100px;
+    background: var(--bg); border-radius: 6px; overflow: hidden;
+    margin-bottom: 0.8rem; cursor: pointer;
+  }
+  .inspector-waveform canvas { width: 100%; height: 100%; display: block; }
+  .inspector-playhead {
+    position: absolute; top: 0; bottom: 0; width: 2px;
+    background: white; pointer-events: none; left: 0;
+    box-shadow: 0 0 6px rgba(255,255,255,0.5);
+    transition: left 0.06s linear;
+  }
+  .inspector-hover {
+    position: absolute; top: 0; bottom: 0; width: 1px;
+    background: rgba(255,255,255,0.25); pointer-events: none;
+    display: none;
+  }
+  .inspector-time-tooltip {
+    position: absolute; top: -22px; transform: translateX(-50%);
+    background: var(--surface); color: var(--text-dim); font-size: 0.7rem;
+    padding: 2px 6px; border-radius: 4px; pointer-events: none;
+    display: none; white-space: nowrap;
+  }
+  .inspector-cuts-legend {
+    font-size: 0.7rem; color: var(--text-dim); margin-bottom: 0.8rem;
+    display: flex; gap: 1rem; align-items: center;
+  }
+  .inspector-cuts-legend .swatch {
+    display: inline-block; width: 12px; height: 12px; border-radius: 2px;
+    vertical-align: middle; margin-right: 3px;
+  }
+  .inspector-controls {
+    display: flex; gap: 0.6rem; align-items: center; justify-content: center;
+  }
+  .inspector-controls .btn { padding: 0.5rem 1.2rem; font-size: 0.82rem; }
+  .inspector-controls .btn.active-play {
+    background: var(--accent); color: white;
+    box-shadow: 0 0 10px rgba(233,69,96,0.4);
+  }
+  .inspector-waveform.selecting { cursor: crosshair; }
+</style>
+</head>
+<body>
+
+<h1>Voice Clone TTS</h1>
+<p class="subtitle">Paste text, generate voice-cloned audio with streaming playback</p>
+
+<div class="container">
+  <div class="status-bar">
+    <div class="status-dot" id="statusDot"></div>
+    <span id="statusText">Connecting...</span>
+    <span style="margin-left:auto" id="statusModel"></span>
+  </div>
+
+  <div class="session-bar">
+    <span class="session-name" id="sessionName">Untitled Session</span>
+    <span class="session-saved" id="sessionSaved">saved</span>
+    <button class="session-btn" id="sessionSaveAsBtn" title="Save session as...">Save As</button>
+    <button class="session-btn" id="sessionLoadBtn" title="Load a saved session">Load</button>
+    <button class="session-btn" id="sessionNewBtn" title="Start new session">New</button>
+    <button class="session-btn" id="sessionExportBtn" title="Export to .vcsession file">Export</button>
+    <button class="session-btn" id="sessionImportBtn" title="Import .vcsession file">Import</button>
+    <input type="file" id="sessionImportFile" accept=".vcsession" style="display:none">
+  </div>
+
+  <div class="voice-section">
+    <div class="voice-header" id="voiceHeader">
+      <span class="voice-title">Voice</span>
+      <span class="voice-active" id="voiceActive">reference: <b id="voiceActiveName">—</b></span>
+      <span class="voice-toggle" id="voiceToggle">&#9660;</span>
+    </div>
+    <div class="voice-body" id="voiceBody">
+      <div style="font-size:0.75rem; color:var(--text-dim); margin-bottom:0.6rem;">
+        Upload a clean clip (under 12s) and its transcript to swap the active F5-TTS reference voice. Lives until server restart.
+      </div>
+      <div class="voice-row">
+        <label for="voiceFile">Audio</label>
+        <input type="file" id="voiceFile" accept="audio/*">
+      </div>
+      <div class="voice-row">
+        <label for="voiceTranscript">Transcript</label>
+        <textarea id="voiceTranscript" placeholder="Exact words spoken in the clip — punctuation matters."></textarea>
+      </div>
+      <div class="voice-row" style="justify-content:flex-end;">
+        <button class="btn btn-primary" id="voiceUseBtn" disabled>Use this voice</button>
+      </div>
+      <div class="voice-status" id="voiceStatus"></div>
+    </div>
+  </div>
+
+  <div class="input-section">
+    <textarea id="textInput" placeholder="Paste your text here. It will be split into chunks and generated with voice cloning..."></textarea>
+    <div class="input-footer">
+      <span class="char-count"><span id="charCount">0</span> chars &middot; ~<span id="chunkEstimate">0</span> chunks</span>
+      <div>
+        <button class="btn btn-primary" id="generateBtn" disabled>Generate</button>
+        <button class="btn btn-stop" id="stopBtn" style="display:none">Stop</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="tuning-section">
+    <div class="tuning-header" id="tuningHeader">
+      <span>Tuning</span>
+      <span class="tuning-toggle" id="tuningToggle">&#9660;</span>
+    </div>
+    <div class="tuning-body" id="tuningBody">
+      <div class="tuning-row" id="rowTemp">
+        <label id="lblTemp">Temperature</label>
+        <input type="range" id="sliderTemp" min="0.1" max="1.0" step="0.05" value="0.5">
+        <span class="tuning-val" id="valTemp">0.50</span>
+        <span class="tuning-hint" id="hintTemp">Low=consistent</span>
+      </div>
+      <div class="tuning-row" id="rowTopP">
+        <label id="lblTopP">Top P</label>
+        <input type="range" id="sliderTopP" min="0.5" max="1.0" step="0.05" value="0.95">
+        <span class="tuning-val" id="valTopP">0.95</span>
+        <span class="tuning-hint" id="hintTopP">Low=focused</span>
+      </div>
+      <div class="tuning-row" id="rowTopK">
+        <label id="lblTopK">Top K</label>
+        <input type="range" id="sliderTopK" min="10" max="200" step="10" value="50">
+        <span class="tuning-val" id="valTopK">50</span>
+        <span class="tuning-hint" id="hintTopK">Low=conservative</span>
+      </div>
+      <div class="tuning-row">
+        <label>Min Chunk</label>
+        <input type="range" id="sliderMinChunk" min="50" max="250" step="10" value="150">
+        <span class="tuning-val" id="valMinChunk">150</span>
+        <span class="tuning-hint">Chars before split</span>
+      </div>
+      <div class="tuning-row">
+        <label>Max Chunk</label>
+        <input type="range" id="sliderMaxChars" min="150" max="500" step="25" value="375">
+        <span class="tuning-val" id="valMaxChars">375</span>
+        <span class="tuning-hint">Max chars/chunk</span>
+      </div>
+      <div class="tuning-row">
+        <label>Silence Level</label>
+        <input type="range" id="sliderSilenceDb" min="-50" max="-25" step="1" value="-40">
+        <span class="tuning-val" id="valSilenceDb">-40dB</span>
+        <span class="tuning-hint">Lower=keep quieter</span>
+      </div>
+      <div class="tuning-row">
+        <label>Trim Pauses</label>
+        <input type="checkbox" id="chkTrimPauses" checked>
+        <span class="tuning-val"></span>
+        <span class="tuning-hint">Compress silence gaps</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="progress-section" id="progressSection">
+    <div class="progress-bar-container">
+      <div class="progress-bar" id="progressBar"></div>
+    </div>
+    <div class="progress-stats">
+      <span id="progressText">Generating...</span>
+      <span id="progressEta"></span>
+    </div>
+  </div>
+
+  <div class="resume-bar" id="resumeBar" style="display:none;">
+    <span id="resumeInfo">0 chunks pending</span>
+    <button class="btn btn-primary btn-sm" id="resumeBtn">&#9654; Resume</button>
+    <button class="btn btn-stop btn-sm" id="resumeStopBtn" style="display:none">Stop</button>
+  </div>
+
+  <div class="player-section" id="playerSection">
+    <!-- Transport -->
+    <div class="transport">
+      <button class="transport-btn" id="skipStartBtn" disabled title="Back to start">&#9198;</button>
+      <button class="transport-btn" id="prevChunkBtn" disabled title="Previous chunk">&#9194;</button>
+      <button class="transport-btn play-main" id="playBtn" disabled title="Play / Pause">&#9654;</button>
+      <button class="transport-btn" id="nextChunkBtn" disabled title="Next chunk">&#9193;</button>
+      <button class="transport-btn" id="skipEndBtn" disabled title="Skip to end">&#9197;</button>
+      <div class="speed-control">
+        <label>Speed</label>
+        <input type="range" id="speedSlider" min="50" max="150" step="1" value="100">
+        <span class="speed-val" id="speedVal">1.00x</span>
+      </div>
+    </div>
+
+    <!-- Now playing -->
+    <div class="now-playing" id="nowPlaying">&nbsp;</div>
+
+    <!-- Waveform -->
+    <div class="waveform-wrap" id="waveformWrap">
+      <canvas id="waveformCanvas"></canvas>
+      <div class="waveform-playhead" id="playhead"></div>
+      <div class="waveform-hover" id="waveformHover"></div>
+      <div class="waveform-tooltip" id="waveformTooltip"></div>
+    </div>
+
+    <!-- Time display -->
+    <div class="time-display">
+      <span id="timeElapsed">0:00</span>
+      <span id="chunkInfo">Chunk 0 / 0</span>
+      <span id="timeTotal">0:00</span>
+    </div>
+
+    <!-- Buffer -->
+    <div class="buffer-indicator">
+      <span>Buffer:</span>
+      <div class="buffer-bar"><div class="buffer-fill" id="bufferFill"></div></div>
+      <span id="bufferText">0 / 0</span>
+    </div>
+  </div>
+
+  <div class="log-section" id="logSection">
+    <div class="log-header">
+      <span class="log-title">Generation Log</span>
+      <button class="btn btn-sm btn-stop" id="toggleLogBtn">Collapse</button>
+    </div>
+    <div id="logEntries"></div>
+  </div>
+
+  <div class="download-section" id="downloadSection">
+    <button class="btn btn-primary" id="downloadBtn">&#11015; Download Trimmed WAV</button>
+    <button class="btn btn-sm" id="downloadRawBtn" style="margin-left:0.5rem">&#11015; Download Raw WAV</button>
+    <div style="margin-top:0.5rem; display:flex; align-items:center; justify-content:center; gap:0.5rem; font-size:0.78rem; color:var(--text-dim);">
+      <label for="outputLevelSelect">Output Level:</label>
+      <select id="outputLevelSelect" style="padding:0.2rem 0.4rem; background:var(--surface); border:1px solid var(--surface2); border-radius:4px; color:var(--text); font-size:0.78rem;">
+        <option value="-1">-1 dB (default)</option>
+        <option value="-3">-3 dB</option>
+        <option value="-6">-6 dB</option>
+        <option value="-12">-12 dB</option>
+        <option value="off">Off (no normalize)</option>
+      </select>
+    </div>
+    <span class="char-count" style="display:block;margin-top:0.4rem" id="downloadInfo"></span>
+  </div>
+</div>
+
+<!-- Session Manager Modal -->
+<div class="session-modal-overlay" id="sessionModalOverlay">
+  <div class="session-modal">
+    <h3>
+      <span id="sessionModalTitle">Saved Sessions</span>
+      <button class="inspector-close" id="sessionModalClose">&times;</button>
+    </h3>
+    <div id="sessionListContainer"></div>
+    <div class="session-modal-actions" id="sessionSaveAsRow" style="display:none;">
+      <input type="text" id="sessionSaveAsName" placeholder="Session name...">
+      <button class="btn btn-sm btn-primary" id="sessionSaveAsConfirm">Save</button>
+    </div>
+  </div>
+</div>
+
+<!-- Chunk Inspector Modal -->
+<div class="inspector-overlay" id="inspectorOverlay">
+  <div class="inspector-modal">
+    <div class="inspector-header">
+      <h3 id="inspectorTitle">Chunk Inspector</h3>
+      <button class="inspector-close" id="inspectorClose">&times;</button>
+    </div>
+    <textarea class="inspector-text" id="inspectorText" rows="2"></textarea>
+    <div class="inspector-info" id="inspectorInfo"></div>
+    <div class="inspector-waveform" id="inspectorWaveform">
+      <canvas id="inspectorCanvas"></canvas>
+      <div class="inspector-playhead" id="inspectorPlayhead"></div>
+      <div class="inspector-hover" id="inspectorHoverLine"></div>
+      <div class="inspector-time-tooltip" id="inspectorTimeTooltip"></div>
+    </div>
+    <div class="inspector-cuts-legend">
+      <span><span class="swatch" style="background:rgba(233,69,96,0.5)"></span>Cut (artifact/silence)</span>
+      <span><span class="swatch" style="background:rgba(251,191,36,0.5)"></span>Cut (pause compress)</span>
+      <span><span class="swatch" style="background:rgba(15,52,96,0.9)"></span>Kept audio</span>
+      <span><span class="swatch" style="background:rgba(100,149,237,0.5)"></span>User cut</span>
+    </div>
+    <div id="inspTrimActions" style="display:none; margin-bottom:0.6rem; gap:0.5rem; align-items:center; justify-content:center;">
+      <button class="btn btn-sm btn-primary" id="inspTrimSelection" title="Add a cut for the selected region">&#9986; Trim Selection</button>
+      <button class="btn btn-sm" id="inspUntrimSelection" title="Remove cuts overlapping the selection">&#8617; Untrim Selection</button>
+      <button class="btn btn-sm btn-stop" id="inspResetTrims" title="Restore original auto-detected cuts">Reset Trims</button>
+    </div>
+    <div class="inspector-controls">
+      <button class="btn btn-sm" id="inspPlayTrimmed">&#9654; Play Trimmed</button>
+      <button class="btn btn-sm" id="inspPlayRaw">&#9654; Play Raw</button>
+      <button class="btn btn-sm btn-stop" id="inspStop">Stop</button>
+      <span style="width:1px;height:20px;background:var(--surface2);margin:0 0.3rem"></span>
+      <button class="btn btn-sm" id="inspDownloadTrimmed" title="Download trimmed chunk">&#11015; Trimmed</button>
+      <button class="btn btn-sm" id="inspDownloadRaw" title="Download raw chunk">&#11015; Raw</button>
+    </div>
+
+    <!-- Regenerate / Delete controls -->
+    <div style="margin-top:1rem; border-top:1px solid var(--bg); padding-top:0.8rem;">
+      <div style="display:flex; gap:0.6rem; align-items:center; margin-bottom:0.6rem;">
+        <button class="btn btn-sm btn-primary" id="inspRegenerate" title="Re-generate this chunk">&#8635; Regenerate</button>
+        <button class="btn btn-sm btn-stop" id="inspDeleteChunk" title="Remove this chunk from output">&#10005; Delete Chunk</button>
+        <span id="inspRegenStatus" style="font-size:0.75rem; color:var(--text-dim);"></span>
+      </div>
+      <div id="inspRegenTuning" style="display:none;">
+        <div style="font-size:0.75rem; color:var(--text-dim); margin-bottom:0.4rem;">Override tuning for this regeneration:</div>
+        <div class="tuning-row" id="inspRowTemp">
+          <label id="inspLblTemp">Temperature</label>
+          <input type="range" id="inspSliderTemp" min="0.1" max="1.0" step="0.05" value="0.4">
+          <span class="tuning-val" id="inspValTemp">0.40</span>
+        </div>
+        <div class="tuning-row" id="inspRowTopP">
+          <label id="inspLblTopP">Top P</label>
+          <input type="range" id="inspSliderTopP" min="0.5" max="1.0" step="0.05" value="0.9">
+          <span class="tuning-val" id="inspValTopP">0.90</span>
+        </div>
+        <div class="tuning-row" id="inspRowTopK">
+          <label id="inspLblTopK">Top K</label>
+          <input type="range" id="inspSliderTopK" min="10" max="200" step="10" value="50">
+          <span class="tuning-val" id="inspValTopK">50</span>
+        </div>
+        <div class="tuning-row">
+          <label>Silence Level</label>
+          <input type="range" id="inspSliderSilenceDb" min="-50" max="-25" step="1" value="-40">
+          <span class="tuning-val" id="inspValSilenceDb">-40dB</span>
+        </div>
+        <div class="tuning-row">
+          <label>Trim Pauses</label>
+          <input type="checkbox" id="inspChkTrimPauses" checked>
+          <span class="tuning-val"></span>
+        </div>
+      </div>
+      <button class="btn btn-sm" id="inspToggleRegenTuning" style="font-size:0.7rem; margin-top:0.3rem; padding:0.2rem 0.6rem;">&#9881; Tune params</button>
+    </div>
+  </div>
+</div>
+
+<script>
+// ============================================================
+// State
+// ============================================================
+const state = {
+  chunks: [],
+  totalChunks: 0,
+  sampleRate: 24000,
+  generating: false,
+  playing: false,
+  currentChunk: 0,
+  playStarted: false,
+  abortController: null,
+  audioCtx: null,
+  currentSource: null,
+  currentAudioEl: null,   // <audio> element used for pitch-preserving playback
+  playbackRate: 1.0,
+  // For scrubber: track where we are within the current chunk
+  chunkPlayOffset: 0,    // seconds into current chunk when we started it
+  chunkStartTime: 0,     // audioCtx.currentTime when chunk started
+  genStartTime: 0,
+  totalAudioDuration: 0,
+  requestId: null,       // server-side request ID for cancellation
+};
+
+const BUFFER_AHEAD = 2;
+
+// ============================================================
+// DOM refs
+// ============================================================
+const $ = id => document.getElementById(id);
+const statusDot = $('statusDot'), statusText = $('statusText'), statusModel = $('statusModel');
+const textInput = $('textInput'), charCount = $('charCount'), chunkEstimate = $('chunkEstimate');
+const generateBtn = $('generateBtn'), stopBtn = $('stopBtn');
+const progressSection = $('progressSection'), progressBar = $('progressBar');
+const progressText = $('progressText'), progressEta = $('progressEta');
+const playerSection = $('playerSection');
+const playBtn = $('playBtn'), prevChunkBtn = $('prevChunkBtn'), nextChunkBtn = $('nextChunkBtn');
+const skipStartBtn = $('skipStartBtn'), skipEndBtn = $('skipEndBtn');
+const nowPlaying = $('nowPlaying');
+const waveformWrap = $('waveformWrap'), waveformCanvas = $('waveformCanvas');
+const playhead = $('playhead'), waveformHover = $('waveformHover'), waveformTooltip = $('waveformTooltip');
+const timeElapsed = $('timeElapsed'), timeTotal = $('timeTotal'), chunkInfo = $('chunkInfo');
+const bufferFill = $('bufferFill'), bufferText = $('bufferText');
+const logSection = $('logSection'), logEntries = $('logEntries'), toggleLogBtn = $('toggleLogBtn');
+const downloadSection = $('downloadSection'), downloadBtn = $('downloadBtn'), downloadRawBtn = $('downloadRawBtn'), downloadInfo = $('downloadInfo');
+
+// Tuning controls
+const tuningHeader = $('tuningHeader'), tuningBody = $('tuningBody'), tuningToggle = $('tuningToggle');
+const sliderTemp = $('sliderTemp'), valTemp = $('valTemp');
+const sliderTopP = $('sliderTopP'), valTopP = $('valTopP');
+const sliderTopK = $('sliderTopK'), valTopK = $('valTopK');
+const sliderMinChunk = $('sliderMinChunk'), valMinChunk = $('valMinChunk');
+const sliderMaxChars = $('sliderMaxChars'), valMaxChars = $('valMaxChars');
+const chkTrimPauses = $('chkTrimPauses');
+
+const sliderSilenceDb = $('sliderSilenceDb'), valSilenceDb = $('valSilenceDb');
+
+function getTuningParams() {
+  return {
+    temperature: parseFloat(sliderTemp.value),
+    top_p: parseFloat(sliderTopP.value),
+    top_k: parseInt(sliderTopK.value),
+    min_chunk: parseInt(sliderMinChunk.value),
+    max_chars: parseInt(sliderMaxChars.value),
+    trim_pauses: chkTrimPauses.checked,
+    silence_db: parseInt(sliderSilenceDb.value),
+  };
+}
+
+// ============================================================
+// Helpers
+// ============================================================
+function fmtTime(s) {
+  if (!isFinite(s) || s < 0) s = 0;
+  const m = Math.floor(s / 60);
+  const sec = Math.floor(s % 60);
+  return `${m}:${sec.toString().padStart(2, '0')}`;
+}
+
+function estimateChunks(text) {
+  const minC = parseInt(sliderMinChunk.value) || 150;
+  const maxC = parseInt(sliderMaxChars.value) || 375;
+  const avg = (minC + maxC) / 2;
+  return Math.max(1, Math.ceil(text.replace(/\s+/g, ' ').trim().length / avg));
+}
+
+function ensureAudioCtx() {
+  if (!state.audioCtx) {
+    state.audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  }
+  if (state.audioCtx.state === 'suspended') {
+    state.audioCtx.resume();
+  }
+}
+
+async function decodeB64Audio(b64) {
+  ensureAudioCtx();
+  const bin = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return await state.audioCtx.decodeAudioData(bytes.buffer.slice(0));
+}
+
+// ── Audio buffer → WAV base64 (used for <audio> element playback) ────
+function audioBufferToWavB64(buf) {
+  const samples = buf.getChannelData(0);
+  const sr = buf.sampleRate;
+  const ab = new ArrayBuffer(44 + samples.length * 2);
+  const v = new DataView(ab);
+  const ws = (o, s) => { for (let i = 0; i < s.length; i++) v.setUint8(o + i, s.charCodeAt(i)); };
+  ws(0,'RIFF'); v.setUint32(4, 36 + samples.length * 2, true);
+  ws(8,'WAVE'); ws(12,'fmt ');
+  v.setUint32(16,16,true); v.setUint16(20,1,true); v.setUint16(22,1,true);
+  v.setUint32(24,sr,true); v.setUint32(28,sr*2,true);
+  v.setUint16(32,2,true); v.setUint16(34,16,true);
+  ws(36,'data'); v.setUint32(40, samples.length * 2, true);
+  for (let i = 0; i < samples.length; i++) {
+    const s = Math.max(-1, Math.min(1, samples[i]));
+    v.setInt16(44 + i * 2, s < 0 ? s * 0x8000 : s * 0x7FFF, true);
+  }
+  const bytes = new Uint8Array(ab);
+  let bin = ''; for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+  return btoa(bin);
+}
+
+// Get cumulative time offset for start of chunk idx
+function chunkStartOffset(idx) {
+  let t = 0;
+  for (let i = 0; i < idx && i < state.chunks.length; i++) {
+    if (state.chunks[i]) t += state.chunks[i].duration;
+  }
+  return t;
+}
+
+function totalDuration() {
+  let t = 0;
+  for (const c of state.chunks) if (c && c.duration) t += c.duration;
+  return t;
+}
+
+function totalRawDuration() {
+  let t = 0;
+  for (const c of state.chunks) if (c && c.durationRaw) t += c.durationRaw;
+  return t;
+}
+
+// Current playback position in seconds (global across all chunks)
+function currentGlobalTime() {
+  if (!state.playing) {
+    return chunkStartOffset(state.currentChunk) + state.chunkPlayOffset;
+  }
+  if (state.currentAudioEl) {
+    // audioEl.currentTime is absolute position in the chunk (original seconds)
+    return chunkStartOffset(state.currentChunk) + state.currentAudioEl.currentTime;
+  }
+  if (state.currentSource) {
+    const elapsed = (state.audioCtx.currentTime - state.chunkStartTime) * state.playbackRate;
+    return chunkStartOffset(state.currentChunk) + state.chunkPlayOffset + elapsed;
+  }
+  return chunkStartOffset(state.currentChunk) + state.chunkPlayOffset;
+}
+
+// ============================================================
+// Server status
+// ============================================================
+// Apply server-provided UI overrides (labels, slider ranges, visibility, defaults)
+// param_ui shape: { temperature: {label, hint, min, max, step, default, visible}, top_p: {...}, top_k: {...} }
+function applyParamUI(paramUI, defaults) {
+  const apply = (param, mainIds, inspIds) => {
+    const cfg = paramUI && paramUI[param];
+    if (!cfg) return;
+    const mainLbl = $(mainIds.lbl), mainHint = $(mainIds.hint),
+          mainSlider = $(mainIds.slider), mainVal = $(mainIds.val),
+          mainRow = $(mainIds.row);
+    const inspLbl = $(inspIds.lbl), inspSlider = $(inspIds.slider),
+          inspVal = $(inspIds.val), inspRow = $(inspIds.row);
+    if (cfg.label) { if (mainLbl) mainLbl.textContent = cfg.label; if (inspLbl) inspLbl.textContent = cfg.label; }
+    if (cfg.hint && mainHint) mainHint.textContent = cfg.hint;
+    if (cfg.visible === false) {
+      if (mainRow) mainRow.style.display = 'none';
+      if (inspRow) inspRow.style.display = 'none';
+      return;
+    }
+    for (const slider of [mainSlider, inspSlider]) {
+      if (!slider) continue;
+      if (cfg.min !== undefined) slider.min = cfg.min;
+      if (cfg.max !== undefined) slider.max = cfg.max;
+      if (cfg.step !== undefined) slider.step = cfg.step;
+    }
+    const dflt = (defaults && defaults[param] !== undefined) ? defaults[param] : cfg.default;
+    if (dflt !== undefined) {
+      if (mainSlider) mainSlider.value = dflt;
+      if (inspSlider) inspSlider.value = dflt;
+      const fmt = (param === 'top_k') ? String(dflt) : Number(dflt).toFixed(2);
+      if (mainVal) mainVal.textContent = fmt;
+      if (inspVal) inspVal.textContent = fmt;
+    }
+  };
+  apply('temperature',
+    {row: 'rowTemp', lbl: 'lblTemp', hint: 'hintTemp', slider: 'sliderTemp', val: 'valTemp'},
+    {row: 'inspRowTemp', lbl: 'inspLblTemp', slider: 'inspSliderTemp', val: 'inspValTemp'});
+  apply('top_p',
+    {row: 'rowTopP', lbl: 'lblTopP', hint: 'hintTopP', slider: 'sliderTopP', val: 'valTopP'},
+    {row: 'inspRowTopP', lbl: 'inspLblTopP', slider: 'inspSliderTopP', val: 'inspValTopP'});
+  apply('top_k',
+    {row: 'rowTopK', lbl: 'lblTopK', hint: 'hintTopK', slider: 'sliderTopK', val: 'valTopK'},
+    {row: 'inspRowTopK', lbl: 'inspLblTopK', slider: 'inspSliderTopK', val: 'inspValTopK'});
+}
+
+let _statusApplied = false;
+async function checkStatus() {
+  try {
+    const resp = await fetch('/status');
+    const data = await resp.json();
+    if (!_statusApplied) {
+      applyParamUI(data.param_ui, data.defaults);
+      _statusApplied = true;
+    }
+    if (data.ready) {
+      statusDot.className = 'status-dot ready';
+      statusText.textContent = 'Server ready';
+      statusModel.textContent = data.model || '';
+      generateBtn.disabled = false;
+      updateVoiceStatus(data);
+    } else {
+      statusDot.className = 'status-dot loading';
+      statusText.textContent = 'Model loading...';
+      setTimeout(checkStatus, 3000);
+    }
+  } catch {
+    statusDot.className = 'status-dot';
+    statusText.textContent = 'Server offline';
+    setTimeout(checkStatus, 5000);
+  }
+}
+
+// ============================================================
+// Waveform rendering
+// ============================================================
+// Per-chunk downsampled waveform peaks (for fast redraw)
+const chunkPeaks = [];  // chunkPeaks[i] = Float32Array of peak values 0..1
+
+function extractPeaks(audioBuffer, numBars) {
+  const raw = audioBuffer.getChannelData(0);
+  const step = Math.max(1, Math.floor(raw.length / numBars));
+  const peaks = new Float32Array(numBars);
+  for (let i = 0; i < numBars; i++) {
+    let max = 0;
+    const start = i * step;
+    const end = Math.min(start + step, raw.length);
+    for (let j = start; j < end; j++) {
+      const v = Math.abs(raw[j]);
+      if (v > max) max = v;
+    }
+    peaks[i] = max;
+  }
+  return peaks;
+}
+
+function initWaveformCanvas() {
+  const dpr = window.devicePixelRatio || 1;
+  const rect = waveformWrap.getBoundingClientRect();
+  waveformCanvas.width = rect.width * dpr;
+  waveformCanvas.height = rect.height * dpr;
+  waveformCanvas.style.width = rect.width + 'px';
+  waveformCanvas.style.height = rect.height + 'px';
+}
+
+function drawWaveform() {
+  const canvas = waveformCanvas;
+  const ctx = canvas.getContext('2d');
+  const dpr = window.devicePixelRatio || 1;
+  const W = canvas.width;
+  const H = canvas.height;
+  const midY = H / 2;
+
+  ctx.clearRect(0, 0, W, H);
+
+  const total = state.totalAudioDuration;
+  if (total <= 0 || state.totalChunks === 0) {
+    // Draw placeholder bars
+    ctx.fillStyle = 'rgba(15,52,96,0.5)';
+    const barW = Math.max(1, W / Math.max(1, state.totalChunks * 40));
+    for (let x = 0; x < W; x += barW + 1) {
+      const h = (3 + Math.random() * 5) * dpr;
+      ctx.fillRect(x, midY - h/2, barW, h);
+    }
+    return;
+  }
+
+  const curTime = currentGlobalTime();
+  let xOffset = 0;
+
+  for (let i = 0; i < state.totalChunks; i++) {
+    const chunk = state.chunks[i];
+    const dur = chunk ? chunk.duration : (total / state.totalChunks); // estimate for pending
+    const chunkW = (dur / total) * W;
+    const peaks = chunkPeaks[i];
+
+    // Determine color
+    let color;
+    if (chunk && chunk.pending) {
+      color = 'rgba(251,191,36,0.3)'; // pending (warm yellow)
+    } else if (!chunk || !chunk.audio) {
+      color = 'rgba(15,52,96,0.4)'; // null/empty
+    } else if (i < state.currentChunk) {
+      color = 'rgba(83,52,131,0.7)'; // played (accent2)
+    } else if (i === state.currentChunk) {
+      color = 'rgba(233,69,96,0.85)'; // playing (accent)
+    } else {
+      color = 'rgba(15,52,96,0.8)'; // buffered
+    }
+
+    ctx.fillStyle = color;
+
+    if (peaks && peaks.length > 0) {
+      const numBars = peaks.length;
+      const barW = Math.max(1, chunkW / numBars - 0.5);
+      for (let b = 0; b < numBars; b++) {
+        const x = xOffset + (b / numBars) * chunkW;
+        const h = Math.max(2 * dpr, peaks[b] * (H * 0.85));
+        ctx.fillRect(x, midY - h/2, barW, h);
+      }
+    } else {
+      // No audio yet — draw small placeholder bars
+      const numBars = Math.max(4, Math.floor(chunkW / (3 * dpr)));
+      const barW = Math.max(1, chunkW / numBars - 0.5);
+      for (let b = 0; b < numBars; b++) {
+        const x = xOffset + (b / numBars) * chunkW;
+        const h = (2 + Math.random() * 4) * dpr;
+        ctx.fillRect(x, midY - h/2, barW, h);
+      }
+    }
+
+    // Chunk separator line
+    if (i > 0) {
+      ctx.fillStyle = 'rgba(26,26,46,0.8)';
+      ctx.fillRect(xOffset, 0, 1 * dpr, H);
+    }
+
+    xOffset += chunkW;
+  }
+
+  // Played overlay — dim everything before current position
+  const playedPct = curTime / total;
+  const playedX = playedPct * W;
+
+  // Draw a subtle gradient overlay on the played portion
+  const grad = ctx.createLinearGradient(0, 0, playedX, 0);
+  grad.addColorStop(0, 'rgba(83,52,131,0.15)');
+  grad.addColorStop(1, 'rgba(83,52,131,0.05)');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, playedX, H);
+
+  // Update playhead position
+  playhead.style.left = (playedPct * 100) + '%';
+}
+
+// ============================================================
+// UI updates
+// ============================================================
+function updateBuffer() {
+  const buffered = state.chunks.filter(c => c && c.audio).length;
+  const pct = state.totalChunks > 0 ? (buffered / state.totalChunks * 100) : 0;
+  bufferFill.style.width = pct + '%';
+  bufferText.textContent = `${buffered} / ${state.totalChunks} chunks`;
+}
+
+function updateProgress() {
+  const done = state.chunks.filter(c => c && c.audio && !c.pending).length;
+  const pct = state.totalChunks > 0 ? (done / state.totalChunks * 100) : 0;
+  progressBar.style.width = pct + '%';
+  progressText.textContent = `Generated ${done} / ${state.totalChunks} chunks`;
+  if (done > 0 && state.generating) {
+    const elapsed = (Date.now() - state.genStartTime) / 1000;
+    const remaining = (state.totalChunks - done) * (elapsed / done);
+    progressEta.textContent = `~${fmtTime(remaining)} remaining`;
+  }
+}
+
+function updateTotalTime() {
+  state.totalAudioDuration = totalDuration();
+  timeTotal.textContent = fmtTime(state.totalAudioDuration);
+}
+
+function updateTimeDisplay() {
+  const total = state.totalAudioDuration;
+  if (total <= 0) return;
+  const cur = currentGlobalTime();
+  timeElapsed.textContent = fmtTime(cur);
+  chunkInfo.textContent = `Chunk ${state.currentChunk + 1} / ${state.totalChunks}`;
+}
+
+function enableTransport() {
+  playBtn.disabled = false;
+  prevChunkBtn.disabled = false;
+  nextChunkBtn.disabled = false;
+  skipStartBtn.disabled = false;
+  skipEndBtn.disabled = false;
+}
+
+// ============================================================
+// Playback
+// ============================================================
+let uiTimer = null;
+let rafId = null;
+
+function startUITimer() {
+  if (uiTimer) return;
+  // Use requestAnimationFrame for smooth waveform/playhead updates
+  function tick() {
+    updateTimeDisplay();
+    drawWaveform();
+    rafId = requestAnimationFrame(tick);
+  }
+  rafId = requestAnimationFrame(tick);
+  uiTimer = true;
+}
+
+function stopUITimer() {
+  if (rafId) { cancelAnimationFrame(rafId); rafId = null; }
+  uiTimer = null;
+}
+
+function startPlayback() {
+  if (state.playing) return;
+  const buffered = state.chunks.filter(c => c && c.audio).length;
+  if (buffered <= state.currentChunk) return;
+
+  ensureAudioCtx();
+  state.playing = true;
+  playBtn.innerHTML = '&#9646;&#9646;';
+  playBtn.classList.remove('ready-pulse');
+  startUITimer();
+  playCurrentChunk();
+}
+
+function pausePlayback() {
+  if (!state.playing) return;
+  state.playing = false;
+  playBtn.innerHTML = '&#9654;';
+
+  if (state.currentAudioEl) {
+    state.chunkPlayOffset = state.currentAudioEl.currentTime;
+    state.currentAudioEl.pause();
+    state.currentAudioEl = null;
+  } else if (state.currentSource && state.audioCtx) {
+    const elapsed = (state.audioCtx.currentTime - state.chunkStartTime) * state.playbackRate;
+    state.chunkPlayOffset += elapsed;
+    try { state.currentSource.stop(); } catch {}
+    state.currentSource = null;
+  }
+  stopUITimer();
+  updateTimeDisplay(); drawWaveform();
+}
+
+function stopAndReset() {
+  if (state.playing) {
+    state.playing = false;
+    if (state.currentAudioEl) {
+      state.currentAudioEl.pause();
+      if (state.currentAudioEl._blobUrl) URL.revokeObjectURL(state.currentAudioEl._blobUrl);
+      state.currentAudioEl = null;
+    }
+    if (state.currentSource) { try { state.currentSource.stop(); } catch {} }
+    state.currentSource = null;
+  }
+  playBtn.innerHTML = '&#9654;';
+  stopUITimer();
+}
+
+async function playCurrentChunk() {
+  if (!state.playing) return;
+
+  const idx = state.currentChunk;
+  if (idx >= state.totalChunks) {
+    // End of all chunks
+    state.playing = false;
+    playBtn.innerHTML = '&#9654;';
+    state.currentChunk = 0;
+    state.chunkPlayOffset = 0;
+    stopUITimer();
+    updateTimeDisplay();
+    drawWaveform();
+    return;
+  }
+
+  const chunk = state.chunks[idx];
+  if (!chunk || !chunk.audio) {
+    // Chunk not ready (or pending), skip to next
+    if (chunk && chunk.pending) {
+      state.currentChunk = idx + 1;
+      state.chunkPlayOffset = 0;
+      playCurrentChunk();
+      return;
+    }
+    // Chunk not ready, wait
+    setTimeout(() => playCurrentChunk(), 300);
+    return;
+  }
+
+  // Skip deleted chunks
+  if (chunk.deleted) {
+    state.currentChunk = idx + 1;
+    state.chunkPlayOffset = 0;
+    playCurrentChunk();
+    return;
+  }
+
+  nowPlaying.textContent = chunk.text;
+
+  ensureAudioCtx();
+  const trimmedBuf = buildTrimmedAudio(chunk);
+  const rate = state.playbackRate;
+  const offset = Math.max(0, state.chunkPlayOffset);
+
+  if (offset >= trimmedBuf.duration) {
+    state.currentChunk = idx + 1;
+    state.chunkPlayOffset = 0;
+    playCurrentChunk();
+    return;
+  }
+
+  state.sourceId = (state.sourceId || 0) + 1;
+  const mySourceId = state.sourceId;
+
+  if (Math.abs(rate - 1.0) >= 0.005) {
+    // ── Pitch-preserving playback via <audio> element (browser-native WSOLA) ──
+    // preservesPitch keeps pitch constant while playbackRate changes speed.
+    const wavB64 = audioBufferToWavB64(trimmedBuf);
+    const blob = base64ToBlob(wavB64, 'audio/wav');
+    const blobUrl = URL.createObjectURL(blob);
+
+    const audioEl = document.createElement('audio');
+    audioEl._blobUrl = blobUrl;
+    audioEl.src = blobUrl;
+    audioEl.preservesPitch = true;
+    audioEl.mozPreservesPitch = true;  // Firefox
+    audioEl.playbackRate = rate;
+    audioEl.currentTime = offset;
+
+    const elSrc = state.audioCtx.createMediaElementSource(audioEl);
+    elSrc.connect(state.audioCtx.destination);
+
+    state.currentAudioEl = audioEl;
+    state.currentSource = null;
+
+    audioEl.onended = () => {
+      URL.revokeObjectURL(blobUrl);
+      if (state.sourceId !== mySourceId || !state.playing) return;
+      state.currentChunk = idx + 1;
+      state.chunkPlayOffset = 0;
+      playCurrentChunk();
+    };
+
+    try { await audioEl.play(); } catch (e) { console.warn('audioEl.play():', e); }
+    return;
+  }
+
+  // ── Standard AudioBufferSourceNode path (rate == 1.0) ──
+  const source = state.audioCtx.createBufferSource();
+  source.buffer = trimmedBuf;
+  source.playbackRate.value = rate;
+  source.connect(state.audioCtx.destination);
+  state.currentSource = source;
+  state.currentAudioEl = null;
+  state.chunkStartTime = state.audioCtx.currentTime;
+
+  source.onended = () => {
+    if (state.sourceId !== mySourceId || !state.playing) return;
+    state.currentChunk = idx + 1;
+    state.chunkPlayOffset = 0;
+    playCurrentChunk();
+  };
+
+  source.start(0, offset);
+}
+
+// ============================================================
+// Seek / skip
+// ============================================================
+function seekToChunk(idx) {
+  if (idx < 0) idx = 0;
+  if (idx >= state.totalChunks) idx = state.totalChunks - 1;
+  if (!state.chunks[idx] || !state.chunks[idx].audio) return;
+
+  const wasPlaying = state.playing;
+  stopAndReset();
+  state.currentChunk = idx;
+  state.chunkPlayOffset = 0;
+  updateTimeDisplay(); drawWaveform();
+  if (wasPlaying) {
+    state.playing = true;
+    playBtn.innerHTML = '&#9646;&#9646;';
+    startUITimer();
+    playCurrentChunk();
+  }
+}
+
+function seekToGlobalTime(t) {
+  // Find which chunk this time falls in
+  let acc = 0;
+  for (let i = 0; i < state.totalChunks; i++) {
+    const c = state.chunks[i];
+    if (!c) continue;
+    if (acc + c.duration > t) {
+      const wasPlaying = state.playing;
+      stopAndReset();
+      state.currentChunk = i;
+      state.chunkPlayOffset = t - acc;
+      updateTimeDisplay(); drawWaveform();
+      if (wasPlaying) {
+        state.playing = true;
+        playBtn.innerHTML = '&#9646;&#9646;';
+        startUITimer();
+        playCurrentChunk();
+      }
+      return;
+    }
+    acc += c.duration;
+  }
+  // Past the end — go to last chunk
+  seekToChunk(state.totalChunks - 1);
+}
+
+function skipPrev() {
+  // If more than 2s into current chunk, restart it; otherwise go to previous
+  if (state.chunkPlayOffset > 2 || (state.playing && state.audioCtx &&
+      (state.audioCtx.currentTime - state.chunkStartTime) > 2)) {
+    seekToChunk(state.currentChunk);
+  } else {
+    seekToChunk(state.currentChunk - 1);
+  }
+}
+
+function skipNext() {
+  seekToChunk(state.currentChunk + 1);
+}
+
+// ============================================================
+// Auto-play
+// ============================================================
+function maybeAutoPlay() {
+  if (state.playStarted) return;
+  const buffered = state.chunks.filter(c => c && c.audio).length;
+  const threshold = Math.min(BUFFER_AHEAD, state.totalChunks);
+  if (buffered >= threshold || (!state.generating && buffered > 0)) {
+    state.playStarted = true;
+    enableTransport();
+    playBtn.classList.add('ready-pulse');
+    // No auto-start — user must click play manually
+  }
+}
+
+// ============================================================
+// Generation via SSE
+// ============================================================
+function cancelGeneration() {
+  // Tell the server to cancel generation immediately
+  if (state.requestId) {
+    fetch('/cancel', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ request_id: state.requestId }),
+    }).catch(() => {}); // fire and forget
+  }
+  // Abort any in-flight fetch
+  if (state.abortController) {
+    state.abortController.abort();
+    state.abortController = null;
+  }
+  // Stop playback
+  stopAndReset();
+  stopUITimer();
+  // Update UI
+  state.generating = false;
+  state.requestId = null;
+  generateBtn.disabled = false;
+  stopBtn.style.display = 'none';
+  if (state.chunks.some(c => c && c.audio)) {
+    progressEta.textContent = 'Cancelled';
+    enableTransport();
+    downloadSection.classList.add('active');
+    downloadInfo.textContent = `${state.chunks.filter(c=>c&&c.audio).length} chunks | trimmed: ${fmtTime(totalDuration())} | raw: ${fmtTime(totalRawDuration())}`;
+  }
+  // Show resume bar if there are remaining pending chunks
+  if (state.chunks.some(c => c && c.pending)) {
+    scheduleAutoSave();
+    showResumeBar();
+  }
+}
+
+async function startGeneration() {
+  const text = textInput.value.trim();
+  if (!text) return;
+
+  // Cancel any previous generation + playback first
+  if (state.generating || state.playing) {
+    cancelGeneration();
+  }
+
+  ensureAudioCtx();
+
+  state.chunks = [];
+  state.totalChunks = 0;
+  state.generating = true;
+  state.currentChunk = 0;
+  state.chunkPlayOffset = 0;
+  state.playStarted = false;
+  state.genStartTime = Date.now();
+  state.totalAudioDuration = 0;
+  chunkPeaks.length = 0;
+
+  generateBtn.disabled = true;
+  stopBtn.style.display = 'inline-block';
+  hideResumeBar();
+  progressSection.classList.add('active');
+  playerSection.classList.add('active');
+  logSection.classList.add('active');
+  downloadSection.classList.remove('active');
+  logEntries.innerHTML = '';
+  Object.keys(logEntryMap).forEach(k => delete logEntryMap[k]);
+  regenQueue.length = 0;
+  progressBar.style.width = '0%';
+  progressEta.textContent = '';
+  timeElapsed.textContent = '0:00';
+  timeTotal.textContent = '0:00';
+  chunkInfo.textContent = 'Chunk 0 / 0';
+  nowPlaying.innerHTML = '&nbsp;';
+  playhead.style.left = '0%';
+  playBtn.disabled = true;
+  playBtn.innerHTML = '&#9654;';
+  playBtn.classList.remove('ready-pulse');
+  prevChunkBtn.disabled = true;
+  nextChunkBtn.disabled = true;
+  skipStartBtn.disabled = true;
+  skipEndBtn.disabled = true;
+  initWaveformCanvas();
+  drawWaveform();
+
+  state.abortController = new AbortController();
+
+  try {
+    const resp = await fetch('/generate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text, ...getTuningParams() }),
+      signal: state.abortController.signal,
+    });
+
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+
+      const messages = buffer.split('\n\n');
+      buffer = messages.pop();
+
+      for (const msg of messages) {
+        if (!msg.trim()) continue;
+        let eventType = 'message', data = '';
+        for (const line of msg.split('\n')) {
+          if (line.startsWith('event: ')) eventType = line.slice(7);
+          else if (line.startsWith('data: ')) data = line.slice(6);
+        }
+        if (!data) continue;
+        try { handleSSE(eventType, JSON.parse(data)); }
+        catch (e) { console.warn('SSE parse error:', e); }
+      }
+    }
+  } catch (e) {
+    if (e.name === 'AbortError') addLog(-1, 'Generation stopped', '', true);
+    else addLog(-1, `Error: ${e.message}`, '', true);
+  }
+
+  // Wait for all async audio decodes to finish before finalizing
+  if (state._pendingDecodes && state._pendingDecodes.length > 0) {
+    await Promise.allSettled(state._pendingDecodes);
+    state._pendingDecodes = [];
+  }
+
+  state.generating = false;
+  generateBtn.disabled = false;
+  stopBtn.style.display = 'none';
+
+  const hasPending = state.chunks.some(c => c && c.pending);
+  progressEta.textContent = hasPending ? 'Cancelled' : 'Done';
+
+  if (state.chunks.some(c => c && c.audio)) {
+    enableTransport();
+    maybeAutoPlay();
+    downloadSection.classList.add('active');
+    downloadInfo.textContent = `${state.chunks.filter(c=>c&&c.audio).length} chunks | trimmed: ${fmtTime(totalDuration())} | raw: ${fmtTime(totalRawDuration())}`;
+  }
+
+  // Show resume bar if there are remaining pending chunks
+  if (hasPending) {
+    showResumeBar();
+  }
+}
+
+function handleSSE(event, data) {
+  switch (event) {
+    case 'info':
+      state.totalChunks = data.total_chunks;
+      state.sampleRate = data.sample_rate;
+      state.requestId = data.request_id || null;
+      // Pre-stage chunks with pending stubs if server provided texts
+      if (data.chunk_texts && data.chunk_texts.length === data.total_chunks) {
+        state.chunks = data.chunk_texts.map((text, i) => ({
+          text, index: i, audio: null, audioRaw: null,
+          duration: 0, durationRaw: 0, cuts: [], genTime: 0,
+          pending: true,
+        }));
+        // Render all pending entries in log immediately
+        for (let i = 0; i < data.total_chunks; i++) {
+          addLog(i, data.chunk_texts[i], '', false, true);  // isPending=true
+        }
+        scheduleAutoSave();
+      } else {
+        state.chunks = new Array(data.total_chunks).fill(null);
+      }
+      chunkPeaks.length = 0;
+      for (let i = 0; i < data.total_chunks; i++) chunkPeaks.push(null);
+      chunkInfo.textContent = `Chunk 0 / ${state.totalChunks}`;
+      initWaveformCanvas();
+      drawWaveform();
+      updateBuffer();
+      updateProgress();
+      break;
+    case 'chunk':
+      state._pendingDecodes = state._pendingDecodes || [];
+      state._pendingDecodes.push(processChunk(data));
+      break;
+    case 'error':
+      state.chunks[data.index] = { audio: null, duration: 0, text: data.text, genTime: 0, index: data.index };
+      addLog(data.index, data.text, 'FAILED', true);
+      updateProgress();
+      break;
+    case 'done':
+      updateProgress();
+      break;
+  }
+}
+
+async function processChunk(data) {
+  try {
+    const audioBuffer = await decodeB64Audio(data.audio_b64);
+    const rawAudioBuffer = data.audio_raw_b64 ? await decodeB64Audio(data.audio_raw_b64) : null;
+    state.chunks[data.index] = {
+      audio: audioBuffer,
+      audioRaw: rawAudioBuffer,
+      duration: data.duration,
+      durationRaw: data.duration_raw || data.duration,
+      cuts: data.cuts || [],
+      text: data.text,
+      genTime: data.gen_time,
+      index: data.index,
+    };
+    // Extract waveform peaks for visualization
+    const barsPerChunk = Math.max(20, Math.floor(waveformCanvas.width / state.totalChunks / 3));
+    chunkPeaks[data.index] = extractPeaks(audioBuffer, barsPerChunk);
+    drawWaveform();
+
+    // Update existing log entry if pre-staged, otherwise add new
+    const existingLog = logEntryMap[data.index];
+    if (existingLog) {
+      const textEl = existingLog.querySelector('.log-text');
+      if (textEl) {
+        textEl.textContent = data.text.substring(0, 80) + (data.text.length > 80 ? '...' : '');
+        textEl.title = data.text.replace(/"/g, '&quot;');
+      }
+      const statsEl = existingLog.querySelector('.log-stats');
+      if (statsEl) { statsEl.textContent = `${data.duration}s in ${data.gen_time}s`; statsEl.className = 'log-stats'; }
+      const regenEl = existingLog.querySelector('.log-regen-status');
+      if (regenEl) regenEl.innerHTML = '';
+    } else {
+      addLog(data.index, data.text, `${data.duration}s in ${data.gen_time}s`, false);
+    }
+    updateProgress();
+    updateTotalTime();
+    updateBuffer();
+    maybeAutoPlay();
+    scheduleAutoSave();
+  } catch (e) {
+    console.error('Decode error chunk', data.index, e);
+    addLog(data.index, data.text, 'Decode failed', true);
+  }
+}
+
+// Track log entry DOM elements per chunk index for regen status updates
+const logEntryMap = {};  // chunkIdx → last log entry DOM element
+
+function addLog(idx, text, stats, isError, isPending) {
+  const entry = document.createElement('div');
+  entry.className = 'log-entry';
+  entry.dataset.chunkIdx = idx;
+  const pendingBadge = isPending ? '<span class="log-regen-badge pending">pending</span>' : '';
+  entry.innerHTML = `
+    <span class="log-idx">${idx >= 0 ? `#${idx + 1}` : '!'}</span>
+    <span class="log-text" title="${text.replace(/"/g, '&quot;')}">${text.substring(0, 80)}${text.length > 80 ? '...' : ''}</span>
+    <span class="log-regen-status">${pendingBadge}</span>
+    <span class="log-stats ${isError ? 'fail' : ''}">${stats}</span>
+  `;
+  if (idx >= 0) {
+    entry.addEventListener('click', (e) => {
+      // Don't open inspector for pending chunks (no audio)
+      const chunk = state.chunks[idx];
+      if (chunk && chunk.pending) return;
+      if (e.shiftKey) { seekToChunk(idx); return; }
+      openInspector(idx);
+    });
+    logEntryMap[idx] = entry;
+  }
+  logEntries.appendChild(entry);
+  logEntries.scrollTop = logEntries.scrollHeight;
+}
+
+// Regen queue tracking
+const regenQueue = [];  // array of { idx, promise }
+let regenActive = false;
+
+function updateLogRegenBadge(idx, status) {
+  // status: 'queued', 'active', 'done', 'failed', or null (clear)
+  const entry = logEntryMap[idx];
+  if (!entry) return;
+  const badge = entry.querySelector('.log-regen-status');
+  if (!badge) return;
+  if (!status) {
+    badge.innerHTML = '';
+    return;
+  }
+  const labels = { queued: '⏳ queued', active: '↻ regen...', done: '✓ regen', failed: '✗ regen' };
+  const cls = status === 'failed' ? 'fail' : status;
+  badge.innerHTML = `<span class="log-regen-badge ${cls}">${labels[status] || status}</span>`;
+}
+
+function regenQueueDepth() {
+  return regenQueue.length;
+}
+
+// ============================================================
+// Download
+// ============================================================
+function getOutputLevelDb() {
+  const val = $('outputLevelSelect').value;
+  if (val === 'off') return null;
+  return parseFloat(val);
+}
+
+function normalizeF32(f32, targetDb) {
+  if (targetDb === null) return f32;  // no normalization
+  let peak = 0;
+  for (let i = 0; i < f32.length; i++) {
+    const a = Math.abs(f32[i]);
+    if (a > peak) peak = a;
+  }
+  if (peak < 0.001) return f32;
+  const target = Math.pow(10, targetDb / 20);
+  const gain = target / peak;
+  const out = new Float32Array(f32.length);
+  for (let i = 0; i < f32.length; i++) {
+    out[i] = Math.max(-1, Math.min(1, f32[i] * gain));
+  }
+  return out;
+}
+
+function downloadCombined() {
+  ensureAudioCtx();
+  const gapSeconds = 0.15;
+  // Build trimmed buffers (applies user cuts + auto cuts to raw audio)
+  const valid = state.chunks.filter(c => c && (c.audioRaw || c.audio) && !c.deleted);
+  const trimmedBuffers = valid.map(c => buildTrimmedAudio(c)).filter(b => b);
+  if (trimmedBuffers.length === 0) return;
+  // Use actual buffer sample rate (browser may have resampled from 24k to 48k)
+  const outRate = trimmedBuffers[0].sampleRate;
+  const gapSamples = Math.floor(outRate * gapSeconds);
+  let totalSamples = 0;
+  for (let i = 0; i < trimmedBuffers.length; i++) {
+    totalSamples += trimmedBuffers[i].length;
+    if (i < trimmedBuffers.length - 1) totalSamples += gapSamples;
+  }
+  const offline = new OfflineAudioContext(1, totalSamples, outRate);
+  let offset = 0;
+  for (let i = 0; i < trimmedBuffers.length; i++) {
+    const src = offline.createBufferSource();
+    src.buffer = trimmedBuffers[i];
+    src.connect(offline.destination);
+    src.start(offset / outRate);
+    offset += trimmedBuffers[i].length;
+    if (i < trimmedBuffers.length - 1) offset += gapSamples;
+  }
+  offline.startRendering().then(buf => {
+    const sr = buf.sampleRate;
+    let f32 = buf.getChannelData(0);
+    f32 = normalizeF32(f32, getOutputLevelDb());
+    const wavBuf = new ArrayBuffer(44 + f32.length * 2);
+    const v = new DataView(wavBuf);
+    const ws = (o, s) => { for (let i = 0; i < s.length; i++) v.setUint8(o+i, s.charCodeAt(i)); };
+    ws(0,'RIFF'); v.setUint32(4,36+f32.length*2,true); ws(8,'WAVE');
+    ws(12,'fmt '); v.setUint32(16,16,true); v.setUint16(20,1,true); v.setUint16(22,1,true);
+    v.setUint32(24,sr,true); v.setUint32(28,sr*2,true);
+    v.setUint16(32,2,true); v.setUint16(34,16,true);
+    ws(36,'data'); v.setUint32(40,f32.length*2,true);
+    for (let i = 0; i < f32.length; i++) {
+      const s = Math.max(-1,Math.min(1,f32[i]));
+      v.setInt16(44+i*2, s<0?s*0x8000:s*0x7FFF, true);
+    }
+    const blob = new Blob([wavBuf], {type:'audio/wav'});
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'voice_clone_output.wav';
+    a.click();
+    URL.revokeObjectURL(a.href);
+  });
+}
+
+function downloadCombinedRaw() {
+  ensureAudioCtx();
+  const gapSeconds = 0.15;
+  const valid = state.chunks.filter(c => c && !c.deleted && (c.audioRaw || c.audio));
+  if (valid.length === 0) return;
+  const firstBuf = valid[0].audioRaw || valid[0].audio;
+  const outRate = firstBuf.sampleRate;
+  const gapSamples = Math.floor(outRate * gapSeconds);
+  let totalSamples = 0;
+  for (let i = 0; i < valid.length; i++) {
+    const buf = valid[i].audioRaw || valid[i].audio;
+    totalSamples += buf.length;
+    if (i < valid.length - 1) totalSamples += gapSamples;
+  }
+  const offline = new OfflineAudioContext(1, totalSamples, outRate);
+  let offset = 0;
+  for (let i = 0; i < valid.length; i++) {
+    const buf = valid[i].audioRaw || valid[i].audio;
+    const src = offline.createBufferSource();
+    src.buffer = buf;
+    src.connect(offline.destination);
+    src.start(offset / outRate);
+    offset += buf.length;
+    if (i < valid.length - 1) offset += gapSamples;
+  }
+  offline.startRendering().then(buf => {
+    const sr = buf.sampleRate;
+    let f32 = buf.getChannelData(0);
+    f32 = normalizeF32(f32, getOutputLevelDb());
+    const wavBuf = new ArrayBuffer(44 + f32.length * 2);
+    const v = new DataView(wavBuf);
+    const ws = (o, s) => { for (let i = 0; i < s.length; i++) v.setUint8(o+i, s.charCodeAt(i)); };
+    ws(0,'RIFF'); v.setUint32(4,36+f32.length*2,true); ws(8,'WAVE');
+    ws(12,'fmt '); v.setUint32(16,16,true); v.setUint16(20,1,true); v.setUint16(22,1,true);
+    v.setUint32(24,sr,true); v.setUint32(28,sr*2,true);
+    v.setUint16(32,2,true); v.setUint16(34,16,true);
+    ws(36,'data'); v.setUint32(40,f32.length*2,true);
+    for (let i = 0; i < f32.length; i++) {
+      const s = Math.max(-1,Math.min(1,f32[i]));
+      v.setInt16(44+i*2, s<0?s*0x8000:s*0x7FFF, true);
+    }
+    const blob = new Blob([wavBuf], {type:'audio/wav'});
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'voice_clone_output_raw.wav';
+    a.click();
+    URL.revokeObjectURL(a.href);
+  });
+}
+
+function downloadAudioBuffer(audioBuffer, filename) {
+  const f32 = audioBuffer.getChannelData(0);
+  const sr = audioBuffer.sampleRate;
+  const wavBuf = new ArrayBuffer(44 + f32.length * 2);
+  const v = new DataView(wavBuf);
+  const ws = (o, s) => { for (let i = 0; i < s.length; i++) v.setUint8(o+i, s.charCodeAt(i)); };
+  ws(0,'RIFF'); v.setUint32(4,36+f32.length*2,true); ws(8,'WAVE');
+  ws(12,'fmt '); v.setUint32(16,16,true); v.setUint16(20,1,true); v.setUint16(22,1,true);
+  v.setUint32(24,sr,true); v.setUint32(28,sr*2,true);
+  v.setUint16(32,2,true); v.setUint16(34,16,true);
+  ws(36,'data'); v.setUint32(40,f32.length*2,true);
+  for (let i = 0; i < f32.length; i++) {
+    const s = Math.max(-1,Math.min(1,f32[i]));
+    v.setInt16(44+i*2, s<0?s*0x8000:s*0x7FFF, true);
+  }
+  const blob = new Blob([wavBuf], {type:'audio/wav'});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+
+// ============================================================
+// Chunk Inspector
+// ============================================================
+const inspectorOverlay = $('inspectorOverlay');
+const inspectorTitle = $('inspectorTitle');
+const inspectorText = $('inspectorText');
+const inspectorInfo = $('inspectorInfo');
+const inspectorCanvas = $('inspectorCanvas');
+const inspectorWaveform = $('inspectorWaveform');
+const inspPlayTrimmed = $('inspPlayTrimmed');
+const inspPlayRaw = $('inspPlayRaw');
+const inspStop = $('inspStop');
+const inspectorClose = $('inspectorClose');
+const inspectorPlayhead = $('inspectorPlayhead');
+const inspectorHoverLine = $('inspectorHoverLine');
+const inspectorTimeTooltip = $('inspectorTimeTooltip');
+
+let inspectorSource = null;  // current AudioBufferSource for inspector playback
+let inspRafId = null;        // rAF id for inspector playhead animation
+const inspState = {
+  chunkIdx: -1,
+  mode: null,        // 'trimmed' or 'raw'
+  playing: false,
+  startTime: 0,      // audioCtx.currentTime when playback started
+  offset: 0,         // seconds into the audio when we started (for seek)
+  duration: 0,       // total duration of what's playing
+  // Selection state (% of raw waveform, 0..1)
+  selStart: null,
+  selEnd: null,
+  selDragging: false,
+  originalCuts: null, // snapshot for Reset Trims
+};
+
+function openInspector(idx) {
+  const chunk = state.chunks[idx];
+  if (!chunk) return;
+
+  inspState.chunkIdx = idx;
+  inspState.playing = false;
+  inspState.offset = 0;
+  inspState.selStart = null;
+  inspState.selEnd = null;
+  inspState.selDragging = false;
+  inspState.originalCuts = JSON.parse(JSON.stringify(chunk.cuts || []));
+  inspectorPlayhead.style.left = '0%';
+  updateTrimActions();
+
+  inspectorTitle.textContent = `Chunk #${idx + 1} Inspector`;
+  inspectorText.value = chunk.text;
+  // Reset regen UI
+  inspRegenStatus.textContent = chunk.deleted ? '⊘ Chunk deleted — regenerate to restore' : '';
+  inspRegenTuning.style.display = 'none';
+  inspToggleRegenTuning.innerHTML = '&#9881; Tune params';
+  updateRegenButton();
+
+  if (chunk.deleted || !chunk.audioRaw) {
+    // Deleted chunk — show minimal info, hide audio controls
+    inspectorInfo.innerHTML = `<span style="color:var(--err)">Chunk deleted</span> <span>— edit text and regenerate</span>`;
+  } else {
+    const removed = (chunk.durationRaw - chunk.duration).toFixed(2);
+    const pct = chunk.durationRaw > 0 ? Math.round((1 - chunk.duration / chunk.durationRaw) * 100) : 0;
+    let cutDetails = '';
+    if (chunk.cuts && chunk.cuts.length > 0) {
+      cutDetails = chunk.cuts.map(c => {
+        const dur = (c.end_ms - c.start_ms).toFixed(0);
+        return `<span class="cut-label">${c.reason} ${dur}ms</span>`;
+      }).join(' &middot; ');
+    }
+    inspectorInfo.innerHTML = `
+      <span>Raw: ${chunk.durationRaw.toFixed(2)}s</span>
+      <span>&rarr;</span>
+      <span>Trimmed: ${chunk.duration.toFixed(2)}s</span>
+      <span>(removed ${removed}s / ${pct}%)</span>
+      ${cutDetails ? '<br>' + cutDetails : ''}
+    `;
+  }
+
+  // Pause main playback if playing
+  if (state.playing) pausePlayback();
+
+  // Show modal first so canvas gets real dimensions, then draw
+  inspectorOverlay.classList.add('open');
+  if (chunk.audioRaw && !chunk.deleted) {
+    requestAnimationFrame(() => {
+      drawInspectorWaveform(chunk);
+    });
+  }
+}
+
+function closeInspector() {
+  stopInspectorPlayback();
+  inspectorOverlay.classList.remove('open');
+  inspState.chunkIdx = -1;
+}
+
+function drawInspectorWaveform(chunk) {
+  const canvas = inspectorCanvas;
+  const dpr = window.devicePixelRatio || 1;
+  const rect = inspectorWaveform.getBoundingClientRect();
+  if (rect.width === 0 || rect.height === 0) return;
+  canvas.width = rect.width * dpr;
+  canvas.height = rect.height * dpr;
+  canvas.style.width = rect.width + 'px';
+  canvas.style.height = rect.height + 'px';
+
+  const ctx = canvas.getContext('2d');
+  const W = canvas.width;
+  const H = canvas.height;
+  const midY = H / 2;
+  ctx.clearRect(0, 0, W, H);
+
+  if (!chunk.audioRaw) return;
+
+  const rawSamples = chunk.audioRaw.getChannelData(0);
+  const rawDurMs = chunk.durationRaw * 1000;
+  const numBars = Math.min(Math.floor(W / 2), 400);
+
+  // Extract peaks from raw audio
+  const step = Math.max(1, Math.floor(rawSamples.length / numBars));
+  const peaks = new Float32Array(numBars);
+  for (let i = 0; i < numBars; i++) {
+    let max = 0;
+    const s = i * step;
+    const e = Math.min(s + step, rawSamples.length);
+    for (let j = s; j < e; j++) {
+      const v = Math.abs(rawSamples[j]);
+      if (v > max) max = v;
+    }
+    peaks[i] = max;
+  }
+
+  // Build a set of cut ranges in bar-index space
+  const cuts = chunk.cuts || [];
+  const barWidth = Math.max(1, W / numBars - 0.5);
+
+  for (let b = 0; b < numBars; b++) {
+    const barStartMs = (b / numBars) * rawDurMs;
+    const barEndMs = ((b + 1) / numBars) * rawDurMs;
+    const x = (b / numBars) * W;
+    const h = Math.max(2 * dpr, peaks[b] * (H * 0.85));
+
+    // Check if this bar falls in a cut region
+    let inCut = false;
+    let cutReason = '';
+    for (const c of cuts) {
+      if (barStartMs < c.end_ms && barEndMs > c.start_ms) {
+        inCut = true;
+        cutReason = c.reason;
+        break;
+      }
+    }
+
+    if (inCut) {
+      // Draw cut region background
+      if (cutReason === 'user') {
+        ctx.fillStyle = 'rgba(100,149,237,0.2)';  // blue bg for user cuts
+      } else if (cutReason === 'pause') {
+        ctx.fillStyle = 'rgba(251,191,36,0.2)';  // warm yellow bg
+      } else {
+        ctx.fillStyle = 'rgba(233,69,96,0.2)';   // red bg
+      }
+      ctx.fillRect(x, 0, barWidth + 0.5, H);
+
+      // Draw bar in cut color
+      if (cutReason === 'user') {
+        ctx.fillStyle = 'rgba(100,149,237,0.6)';
+      } else if (cutReason === 'pause') {
+        ctx.fillStyle = 'rgba(251,191,36,0.6)';
+      } else {
+        ctx.fillStyle = 'rgba(233,69,96,0.6)';
+      }
+    } else {
+      ctx.fillStyle = 'rgba(15,52,96,0.9)';
+    }
+
+    ctx.fillRect(x, midY - h / 2, barWidth, h);
+  }
+
+  // Draw selection overlay
+  if (inspState.selStart !== null && inspState.selEnd !== null) {
+    const s = Math.min(inspState.selStart, inspState.selEnd);
+    const e = Math.max(inspState.selStart, inspState.selEnd);
+    const sx = s * W;
+    const sw = (e - s) * W;
+    ctx.fillStyle = 'rgba(100,149,237,0.15)';
+    ctx.fillRect(sx, 0, sw, H);
+    ctx.strokeStyle = 'rgba(100,149,237,0.8)';
+    ctx.lineWidth = 2 * dpr;
+    ctx.setLineDash([4 * dpr, 4 * dpr]);
+    ctx.strokeRect(sx, 1, sw, H - 2);
+    ctx.setLineDash([]);
+  }
+}
+
+function inspectorCurrentTime() {
+  if (!inspState.playing || !state.audioCtx) return inspState.offset;
+  return inspState.offset + (state.audioCtx.currentTime - inspState.startTime);
+}
+
+// Map trimmed playback time (seconds) to a percentage on the raw waveform.
+// The raw waveform has cut regions removed in the trimmed version,
+// so we need to "skip over" cut regions to find where we are in raw time.
+function trimmedTimeToRawPct(trimmedTimeSec, chunk) {
+  if (!chunk || !chunk.durationRaw || chunk.durationRaw <= 0) return 0;
+  const cuts = chunk.cuts || [];
+  if (cuts.length === 0) {
+    // No cuts — trimmed and raw are the same
+    return Math.min(1, trimmedTimeSec / chunk.durationRaw);
+  }
+
+  // Sort cuts by start_ms
+  const sorted = cuts.slice().sort((a, b) => a.start_ms - b.start_ms);
+  const rawDurMs = chunk.durationRaw * 1000;
+  let trimmedMs = trimmedTimeSec * 1000;
+
+  // Walk through raw timeline, skipping cut regions, consuming trimmedMs
+  let rawPos = 0; // current position in raw ms
+  for (const c of sorted) {
+    // Gap of kept audio before this cut
+    const keptBefore = c.start_ms - rawPos;
+    if (keptBefore > 0) {
+      if (trimmedMs <= keptBefore) {
+        // We land in this kept region
+        return Math.min(1, (rawPos + trimmedMs) / rawDurMs);
+      }
+      trimmedMs -= keptBefore;
+    }
+    // Skip over the cut region
+    rawPos = c.end_ms;
+  }
+  // Remaining kept audio after last cut
+  return Math.min(1, (rawPos + trimmedMs) / rawDurMs);
+}
+
+function startInspectorPlayheadLoop() {
+  if (inspRafId) return;
+  function tick() {
+    if (!inspState.playing) { inspRafId = null; return; }
+    const t = inspectorCurrentTime();
+    const chunk = state.chunks[inspState.chunkIdx];
+    let pct;
+    if (inspState.mode === 'trimmed' && chunk) {
+      pct = trimmedTimeToRawPct(t, chunk);
+    } else {
+      pct = inspState.duration > 0 ? Math.min(1, t / inspState.duration) : 0;
+    }
+    inspectorPlayhead.style.left = (pct * 100) + '%';
+    inspRafId = requestAnimationFrame(tick);
+  }
+  inspRafId = requestAnimationFrame(tick);
+}
+
+function stopInspectorPlayheadLoop() {
+  if (inspRafId) { cancelAnimationFrame(inspRafId); inspRafId = null; }
+}
+
+function stopInspectorPlayback() {
+  inspState.playing = false;
+  stopInspectorPlayheadLoop();
+  if (inspectorSource) {
+    try { inspectorSource.stop(); } catch {}
+    inspectorSource = null;
+  }
+  inspPlayTrimmed.classList.remove('active-play');
+  inspPlayRaw.classList.remove('active-play');
+  inspPlayTrimmed.innerHTML = '&#9654; Play Trimmed';
+  inspPlayRaw.innerHTML = '&#9654; Play Raw';
+}
+
+function inspectorPlay(audioBuffer, btn, mode) {
+  stopInspectorPlayback();
+  ensureAudioCtx();
+  const source = state.audioCtx.createBufferSource();
+  source.buffer = audioBuffer;
+  source.connect(state.audioCtx.destination);
+  inspectorSource = source;
+  inspState.mode = mode;
+  inspState.playing = true;
+  inspState.duration = audioBuffer.duration;
+  inspState.startTime = state.audioCtx.currentTime;
+  // inspState.offset is preserved from seek; 0 on fresh play
+  btn.classList.add('active-play');
+  btn.innerHTML = '&#9646;&#9646; Playing...';
+  source.onended = () => {
+    if (inspectorSource !== source) return; // stale
+    inspState.playing = false;
+    inspState.offset = 0;
+    stopInspectorPlayheadLoop();
+    inspectorSource = null;
+    btn.classList.remove('active-play');
+    btn.innerHTML = btn === inspPlayTrimmed ? '&#9654; Play Trimmed' : '&#9654; Play Raw';
+    // Reset playhead: for trimmed mode, go to start of kept audio
+    const chunk = state.chunks[inspState.chunkIdx];
+    if (mode === 'trimmed' && chunk) {
+      inspectorPlayhead.style.left = (trimmedTimeToRawPct(0, chunk) * 100) + '%';
+    } else {
+      inspectorPlayhead.style.left = '0%';
+    }
+  };
+  const off = Math.max(0, Math.min(inspState.offset, audioBuffer.duration - 0.01));
+  source.start(0, off);
+  // Position playhead at starting position
+  const chunk = state.chunks[inspState.chunkIdx];
+  if (mode === 'trimmed' && chunk) {
+    inspectorPlayhead.style.left = (trimmedTimeToRawPct(off, chunk) * 100) + '%';
+  }
+  startInspectorPlayheadLoop();
+}
+
+function inspectorSeek(pct) {
+  // pct is 0..1 in the currently playing audio
+  const chunk = state.chunks[inspState.chunkIdx];
+  if (!chunk) return;
+
+  // If playing, restart from new position
+  const wasPlaying = inspState.playing;
+  const mode = inspState.mode || 'raw';  // default to raw if nothing played yet
+  stopInspectorPlayback();
+
+  // Determine which audio + duration based on mode
+  const audioBuffer = mode === 'trimmed' ? chunk.audio : chunk.audioRaw;
+  const dur = audioBuffer ? audioBuffer.duration : chunk.durationRaw;
+  inspState.offset = pct * dur;
+
+  // Update playhead visually (for raw mode, use pct of raw duration directly)
+  // For trimmed mode, the waveform shows raw so we'd need to map — but since
+  // the waveform always shows raw audio, show playhead on the raw timeline
+  if (mode === 'raw') {
+    inspectorPlayhead.style.left = (pct * 100) + '%';
+  } else {
+    // Trimmed playback on raw waveform — approximate: trimmed audio starts after leading cuts
+    // For now just position proportionally to trimmed portion
+    inspectorPlayhead.style.left = (pct * 100) + '%';
+  }
+
+  if (wasPlaying && audioBuffer) {
+    const btn = mode === 'trimmed' ? inspPlayTrimmed : inspPlayRaw;
+    inspectorPlay(audioBuffer, btn, mode);
+  }
+}
+
+// Inspector waveform interaction — click to seek, drag to select
+let inspMouseDownPct = null;
+let inspMouseMoved = false;
+
+inspectorWaveform.addEventListener('mousedown', (e) => {
+  e.preventDefault();
+  const rect = inspectorWaveform.getBoundingClientRect();
+  const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+  inspMouseDownPct = pct;
+  inspMouseMoved = false;
+  inspState.selDragging = true;
+  inspState.selStart = pct;
+  inspState.selEnd = pct;
+  inspectorWaveform.classList.add('selecting');
+});
+
+inspectorWaveform.addEventListener('mousemove', (e) => {
+  const chunk = state.chunks[inspState.chunkIdx];
+  if (!chunk) return;
+  const rect = inspectorWaveform.getBoundingClientRect();
+  const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+
+  // Hover tooltip
+  const t = pct * chunk.durationRaw;
+  inspectorHoverLine.style.display = 'block';
+  inspectorHoverLine.style.left = (pct * 100) + '%';
+  inspectorTimeTooltip.style.display = 'block';
+  inspectorTimeTooltip.style.left = (pct * 100) + '%';
+  inspectorTimeTooltip.textContent = fmtTime(t);
+
+  // Drag selection
+  if (inspState.selDragging && inspMouseDownPct !== null) {
+    if (Math.abs(pct - inspMouseDownPct) > 0.005) inspMouseMoved = true;
+    inspState.selEnd = pct;
+    drawInspectorWaveform(chunk);
+    updateTrimActions();
+  }
+});
+
+document.addEventListener('mouseup', (e) => {
+  if (!inspState.selDragging) return;
+  inspState.selDragging = false;
+  inspectorWaveform.classList.remove('selecting');
+
+  const chunk = state.chunks[inspState.chunkIdx];
+  if (!chunk) return;
+
+  if (!inspMouseMoved) {
+    // It was a click, not a drag — seek
+    inspState.selStart = null;
+    inspState.selEnd = null;
+    updateTrimActions();
+    const pct = inspMouseDownPct;
+    if (inspState.playing) {
+      inspectorSeek(pct);
+    } else {
+      inspState.mode = inspState.mode || 'raw';
+      const mode = inspState.mode;
+      const audioBuffer = mode === 'trimmed' ? chunk.audio : (chunk.audioRaw || chunk.audio);
+      if (!audioBuffer) return;
+      inspState.offset = pct * audioBuffer.duration;
+      inspectorPlayhead.style.left = (pct * 100) + '%';
+      const btn = mode === 'trimmed' ? inspPlayTrimmed : inspPlayRaw;
+      inspectorPlay(audioBuffer, btn, mode);
+    }
+    drawInspectorWaveform(chunk);
+  } else {
+    // Ensure start < end
+    if (inspState.selStart > inspState.selEnd) {
+      [inspState.selStart, inspState.selEnd] = [inspState.selEnd, inspState.selStart];
+    }
+    drawInspectorWaveform(chunk);
+    updateTrimActions();
+  }
+  inspMouseDownPct = null;
+});
+
+inspectorWaveform.addEventListener('mouseleave', () => {
+  if (!inspState.selDragging) {
+    inspectorHoverLine.style.display = 'none';
+    inspectorTimeTooltip.style.display = 'none';
+  }
+});
+
+// Trim action buttons visibility
+function updateTrimActions() {
+  const el = $('inspTrimActions');
+  const hasSelection = inspState.selStart !== null && inspState.selEnd !== null
+    && Math.abs(inspState.selEnd - inspState.selStart) > 0.005;
+  el.style.display = hasSelection ? 'flex' : 'none';
+}
+
+// Recalculate trimmed duration from raw duration minus cut durations
+function recalcDurationFromCuts(chunk) {
+  if (!chunk || !chunk.durationRaw) return;
+  const rawMs = chunk.durationRaw * 1000;
+  let cutMs = 0;
+  for (const c of (chunk.cuts || [])) {
+    cutMs += (c.end_ms - c.start_ms);
+  }
+  chunk.duration = Math.max(0, (rawMs - cutMs) / 1000);
+}
+
+// Trim Selection — add a user cut for the selected region
+$('inspTrimSelection').addEventListener('click', () => {
+  const chunk = state.chunks[inspState.chunkIdx];
+  if (!chunk || inspState.selStart === null) return;
+  const s = Math.min(inspState.selStart, inspState.selEnd);
+  const e = Math.max(inspState.selStart, inspState.selEnd);
+  const startMs = s * chunk.durationRaw * 1000;
+  const endMs = e * chunk.durationRaw * 1000;
+  chunk.cuts = chunk.cuts || [];
+  chunk.cuts.push({ start_ms: Math.round(startMs * 10) / 10, end_ms: Math.round(endMs * 10) / 10, reason: 'user' });
+  // Sort cuts by start_ms
+  chunk.cuts.sort((a, b) => a.start_ms - b.start_ms);
+  recalcDurationFromCuts(chunk);
+  // Clear selection
+  inspState.selStart = null;
+  inspState.selEnd = null;
+  updateTrimActions();
+  drawInspectorWaveform(chunk);
+  // Update info display
+  refreshInspectorInfo(chunk);
+  updateTotalTime();
+  drawWaveform();
+  scheduleAutoSave();
+});
+
+// Untrim Selection — remove any cuts overlapping the selection
+$('inspUntrimSelection').addEventListener('click', () => {
+  const chunk = state.chunks[inspState.chunkIdx];
+  if (!chunk || inspState.selStart === null) return;
+  const s = Math.min(inspState.selStart, inspState.selEnd);
+  const e = Math.max(inspState.selStart, inspState.selEnd);
+  const startMs = s * chunk.durationRaw * 1000;
+  const endMs = e * chunk.durationRaw * 1000;
+  // Remove cuts that overlap with the selection
+  chunk.cuts = (chunk.cuts || []).filter(c => {
+    return !(c.start_ms < endMs && c.end_ms > startMs);
+  });
+  recalcDurationFromCuts(chunk);
+  inspState.selStart = null;
+  inspState.selEnd = null;
+  updateTrimActions();
+  drawInspectorWaveform(chunk);
+  refreshInspectorInfo(chunk);
+  updateTotalTime();
+  drawWaveform();
+  scheduleAutoSave();
+});
+
+// Reset Trims — restore original auto-detected cuts
+$('inspResetTrims').addEventListener('click', () => {
+  const chunk = state.chunks[inspState.chunkIdx];
+  if (!chunk || !inspState.originalCuts) return;
+  chunk.cuts = JSON.parse(JSON.stringify(inspState.originalCuts));
+  recalcDurationFromCuts(chunk);
+  inspState.selStart = null;
+  inspState.selEnd = null;
+  updateTrimActions();
+  drawInspectorWaveform(chunk);
+  refreshInspectorInfo(chunk);
+  updateTotalTime();
+  drawWaveform();
+  scheduleAutoSave();
+});
+
+function refreshInspectorInfo(chunk) {
+  if (!chunk || chunk.deleted) return;
+  const removed = (chunk.durationRaw - chunk.duration).toFixed(2);
+  const pct = chunk.durationRaw > 0 ? Math.round((1 - chunk.duration / chunk.durationRaw) * 100) : 0;
+  let cutDetails = '';
+  if (chunk.cuts && chunk.cuts.length > 0) {
+    cutDetails = chunk.cuts.map(c => {
+      const dur = (c.end_ms - c.start_ms).toFixed(0);
+      return `<span class="cut-label">${c.reason} ${dur}ms</span>`;
+    }).join(' &middot; ');
+  }
+  inspectorInfo.innerHTML = `
+    <span>Raw: ${chunk.durationRaw.toFixed(2)}s</span>
+    <span>&rarr;</span>
+    <span>Trimmed: ${chunk.duration.toFixed(2)}s</span>
+    <span>(removed ${removed}s / ${pct}%)</span>
+    ${cutDetails ? '<br>' + cutDetails : ''}
+  `;
+}
+
+// ============================================================
+// Event listeners
+// ============================================================
+textInput.addEventListener('input', () => {
+  charCount.textContent = textInput.value.length.toLocaleString();
+  chunkEstimate.textContent = estimateChunks(textInput.value);
+});
+
+generateBtn.addEventListener('click', () => startGeneration());
+
+stopBtn.addEventListener('click', () => cancelGeneration());
+
+// Tuning panel toggle
+tuningHeader.addEventListener('click', () => {
+  const open = tuningBody.classList.toggle('open');
+  tuningToggle.innerHTML = open ? '&#9650;' : '&#9660;';
+});
+
+// ============================================================
+// Voice (reference) upload
+// ============================================================
+const voiceHeader = $('voiceHeader'), voiceBody = $('voiceBody'), voiceToggle = $('voiceToggle');
+const voiceFile = $('voiceFile'), voiceTranscript = $('voiceTranscript');
+const voiceUseBtn = $('voiceUseBtn'), voiceStatus = $('voiceStatus');
+const voiceActiveName = $('voiceActiveName');
+
+function updateVoiceStatus(data) {
+  if (data && data.ref_name) {
+    voiceActiveName.textContent = data.ref_name;
+    voiceActiveName.title = data.ref_text_full || data.ref_text || '';
+  } else {
+    voiceActiveName.textContent = '—';
+    voiceActiveName.title = '';
+  }
+}
+
+voiceHeader.addEventListener('click', () => {
+  const open = voiceBody.classList.toggle('open');
+  voiceToggle.innerHTML = open ? '&#9650;' : '&#9660;';
+});
+
+function refreshVoiceBtn() {
+  voiceUseBtn.disabled = !(voiceFile.files && voiceFile.files[0]
+                           && voiceTranscript.value.trim().length > 0);
+}
+voiceFile.addEventListener('change', refreshVoiceBtn);
+voiceTranscript.addEventListener('input', refreshVoiceBtn);
+
+voiceUseBtn.addEventListener('click', async () => {
+  const f = voiceFile.files && voiceFile.files[0];
+  const transcript = voiceTranscript.value.trim();
+  if (!f || !transcript) return;
+
+  voiceStatus.className = 'voice-status';
+  voiceStatus.textContent = 'Uploading…';
+  voiceUseBtn.disabled = true;
+
+  const fd = new FormData();
+  fd.append('audio', f);
+  fd.append('transcript', transcript);
+
+  try {
+    const resp = await fetch('/reference', { method: 'POST', body: fd });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      voiceStatus.className = 'voice-status err';
+      voiceStatus.textContent = data.error || `Upload failed (${resp.status})`;
+    } else {
+      voiceStatus.className = 'voice-status ok';
+      voiceStatus.textContent = `Active voice: ${data.ref_name} (${data.duration}s).`;
+      updateVoiceStatus(data);
+    }
+  } catch (e) {
+    voiceStatus.className = 'voice-status err';
+    voiceStatus.textContent = `Upload failed: ${e.message || e}`;
+  } finally {
+    refreshVoiceBtn();
+  }
+});
+
+// Tuning sliders — update display values on input
+sliderTemp.addEventListener('input', () => { valTemp.textContent = parseFloat(sliderTemp.value).toFixed(2); });
+sliderTopP.addEventListener('input', () => { valTopP.textContent = parseFloat(sliderTopP.value).toFixed(2); });
+sliderTopK.addEventListener('input', () => { valTopK.textContent = sliderTopK.value; });
+sliderMinChunk.addEventListener('input', () => { valMinChunk.textContent = sliderMinChunk.value; });
+sliderMaxChars.addEventListener('input', () => { valMaxChars.textContent = sliderMaxChars.value; });
+sliderSilenceDb.addEventListener('input', () => { valSilenceDb.textContent = sliderSilenceDb.value + 'dB'; });
+
+playBtn.addEventListener('click', () => {
+  if (state.playing) pausePlayback();
+  else startPlayback();
+});
+
+prevChunkBtn.addEventListener('click', () => skipPrev());
+nextChunkBtn.addEventListener('click', () => skipNext());
+skipStartBtn.addEventListener('click', () => seekToChunk(0));
+skipEndBtn.addEventListener('click', () => {
+  const last = state.chunks.findLastIndex(c => c && c.audio);
+  if (last >= 0) seekToChunk(last);
+});
+
+// Speed slider
+const speedSlider = $('speedSlider'), speedVal = $('speedVal');
+speedSlider.addEventListener('input', () => {
+  const pct = parseInt(speedSlider.value);
+  state.playbackRate = pct / 100;
+  speedVal.textContent = state.playbackRate.toFixed(2) + 'x';
+  if (state.currentAudioEl) {
+    state.currentAudioEl.playbackRate = state.playbackRate;
+  } else if (state.currentSource) {
+    state.currentSource.playbackRate.value = state.playbackRate;
+  }
+});
+
+// Waveform click to seek
+waveformWrap.addEventListener('click', (e) => {
+  if (state.totalAudioDuration <= 0) return;
+  const rect = waveformWrap.getBoundingClientRect();
+  const pct = (e.clientX - rect.left) / rect.width;
+  seekToGlobalTime(pct * state.totalAudioDuration);
+});
+
+// Waveform hover — show time tooltip
+waveformWrap.addEventListener('mousemove', (e) => {
+  if (state.totalAudioDuration <= 0) return;
+  const rect = waveformWrap.getBoundingClientRect();
+  const pct = (e.clientX - rect.left) / rect.width;
+  const t = pct * state.totalAudioDuration;
+  waveformHover.style.display = 'block';
+  waveformHover.style.left = (pct * 100) + '%';
+  waveformTooltip.style.display = 'block';
+  waveformTooltip.style.left = (pct * 100) + '%';
+  waveformTooltip.textContent = fmtTime(t);
+});
+waveformWrap.addEventListener('mouseleave', () => {
+  waveformHover.style.display = 'none';
+  waveformTooltip.style.display = 'none';
+});
+
+// Redraw waveform on resize
+window.addEventListener('resize', () => {
+  initWaveformCanvas();
+  // Re-extract peaks at new resolution
+  for (let i = 0; i < state.totalChunks; i++) {
+    const c = state.chunks[i];
+    if (c && c.audio) {
+      const barsPerChunk = Math.max(20, Math.floor(waveformCanvas.width / state.totalChunks / 3));
+      chunkPeaks[i] = extractPeaks(c.audio, barsPerChunk);
+    }
+  }
+  drawWaveform();
+});
+
+toggleLogBtn.addEventListener('click', () => {
+  if (logEntries.style.display === 'none') {
+    logEntries.style.display = 'block';
+    toggleLogBtn.textContent = 'Collapse';
+  } else {
+    logEntries.style.display = 'none';
+    toggleLogBtn.textContent = 'Expand';
+  }
+});
+
+downloadBtn.addEventListener('click', () => downloadCombined());
+downloadRawBtn.addEventListener('click', () => downloadCombinedRaw());
+
+// Inspector events
+inspectorClose.addEventListener('click', closeInspector);
+inspectorOverlay.addEventListener('click', (e) => {
+  if (e.target === inspectorOverlay) closeInspector();
+});
+inspPlayTrimmed.addEventListener('click', () => {
+  const chunk = state.chunks[inspState.chunkIdx];
+  if (chunk && (chunk.audioRaw || chunk.audio)) {
+    const trimmedBuf = buildTrimmedAudio(chunk);
+    if (!trimmedBuf) return;
+    inspState.offset = 0;
+    // Position playhead at start of kept audio on the raw waveform
+    inspectorPlayhead.style.left = (trimmedTimeToRawPct(0, chunk) * 100) + '%';
+    inspectorPlay(trimmedBuf, inspPlayTrimmed, 'trimmed');
+  }
+});
+inspPlayRaw.addEventListener('click', () => {
+  const chunk = state.chunks[inspState.chunkIdx];
+  if (chunk && chunk.audioRaw) {
+    inspState.offset = 0;
+    inspectorPlay(chunk.audioRaw, inspPlayRaw, 'raw');
+  }
+});
+inspStop.addEventListener('click', stopInspectorPlayback);
+
+$('inspDownloadTrimmed').addEventListener('click', () => {
+  const chunk = state.chunks[inspState.chunkIdx];
+  if (chunk && (chunk.audioRaw || chunk.audio)) {
+    const trimmedBuf = buildTrimmedAudio(chunk);
+    if (trimmedBuf) downloadAudioBuffer(trimmedBuf, `chunk_${inspState.chunkIdx + 1}_trimmed.wav`);
+  }
+});
+$('inspDownloadRaw').addEventListener('click', () => {
+  const chunk = state.chunks[inspState.chunkIdx];
+  if (chunk && chunk.audioRaw) downloadAudioBuffer(chunk.audioRaw, `chunk_${inspState.chunkIdx + 1}_raw.wav`);
+});
+
+// Regenerate tuning toggle
+const inspRegenTuning = $('inspRegenTuning');
+const inspToggleRegenTuning = $('inspToggleRegenTuning');
+const inspSliderTemp = $('inspSliderTemp');
+const inspSliderTopP = $('inspSliderTopP');
+const inspSliderTopK = $('inspSliderTopK');
+const inspChkTrimPauses = $('inspChkTrimPauses');
+const inspRegenStatus = $('inspRegenStatus');
+
+inspToggleRegenTuning.addEventListener('click', (e) => {
+  e.stopPropagation();
+  console.log('Tune params clicked, current display:', inspRegenTuning.style.display);
+  const isHidden = inspRegenTuning.style.display === 'none' || inspRegenTuning.style.display === '';
+  inspRegenTuning.style.display = isHidden ? 'block' : 'none';
+  inspToggleRegenTuning.innerHTML = isHidden ? '&#9881; Hide params' : '&#9881; Tune params';
+  // Sync with main tuning sliders on first open
+  if (isHidden) {
+    inspSliderTemp.value = sliderTemp.value;
+    $('inspValTemp').textContent = parseFloat(sliderTemp.value).toFixed(2);
+    inspSliderTopP.value = sliderTopP.value;
+    $('inspValTopP').textContent = parseFloat(sliderTopP.value).toFixed(2);
+    inspSliderTopK.value = sliderTopK.value;
+    $('inspValTopK').textContent = sliderTopK.value;
+    inspSliderSilenceDb.value = sliderSilenceDb.value;
+    $('inspValSilenceDb').textContent = sliderSilenceDb.value + 'dB';
+    inspChkTrimPauses.checked = chkTrimPauses.checked;
+  }
+});
+const inspSliderSilenceDb = $('inspSliderSilenceDb');
+inspSliderTemp.addEventListener('input', () => { $('inspValTemp').textContent = parseFloat(inspSliderTemp.value).toFixed(2); });
+inspSliderTopP.addEventListener('input', () => { $('inspValTopP').textContent = parseFloat(inspSliderTopP.value).toFixed(2); });
+inspSliderTopK.addEventListener('input', () => { $('inspValTopK').textContent = inspSliderTopK.value; });
+inspSliderSilenceDb.addEventListener('input', () => { $('inspValSilenceDb').textContent = inspSliderSilenceDb.value + 'dB'; });
+
+// Regenerate chunk — supports queueing multiple regens
+async function doRegenerate(idx, params) {
+  updateLogRegenBadge(idx, 'active');
+  try {
+    const resp = await fetch('/regenerate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(params),
+    });
+    const data = await resp.json();
+
+    if (data.error) {
+      updateLogRegenBadge(idx, 'failed');
+      return { error: data.error };
+    }
+    // Decode and replace chunk data
+    const audioBuffer = await decodeB64Audio(data.audio_b64);
+    const rawAudioBuffer = data.audio_raw_b64 ? await decodeB64Audio(data.audio_raw_b64) : null;
+    state.chunks[idx] = {
+      audio: audioBuffer,
+      audioRaw: rawAudioBuffer,
+      duration: data.duration,
+      durationRaw: data.duration_raw || data.duration,
+      cuts: data.cuts || [],
+      text: params.text,
+      genTime: data.gen_time,
+      index: idx,
+    };
+    const barsPerChunk = Math.max(20, Math.floor(waveformCanvas.width / state.totalChunks / 3));
+    chunkPeaks[idx] = extractPeaks(audioBuffer, barsPerChunk);
+    updateTotalTime();
+    updateBuffer();
+    drawWaveform();
+    downloadInfo.textContent = `${state.chunks.filter(c=>c&&c.audio).length} chunks | trimmed: ${fmtTime(totalDuration())} | raw: ${fmtTime(totalRawDuration())}`;
+
+    updateLogRegenBadge(idx, 'done');
+    scheduleAutoSave();
+    // Update the log entry with new text and stats
+    const logEntry = logEntryMap[idx];
+    if (logEntry) {
+      // Update preview text to reflect edited text
+      const textEl = logEntry.querySelector('.log-text');
+      if (textEl) {
+        const t = params.text;
+        textEl.textContent = t.substring(0, 80) + (t.length > 80 ? '...' : '');
+        textEl.title = t.replace(/"/g, '&quot;');
+      }
+      // Update stats
+      const statsEl = logEntry.querySelector('.log-stats');
+      if (statsEl) { statsEl.textContent = `${data.duration}s in ${data.gen_time}s`; statsEl.className = 'log-stats'; }
+      // Clear deleted styling if previously deleted
+      if (logEntry.classList.contains('deleted')) {
+        logEntry.classList.remove('deleted');
+        logEntry.style.textDecoration = '';
+      }
+    }
+    return data;
+  } catch (e) {
+    updateLogRegenBadge(idx, 'failed');
+    return { error: e.message };
+  }
+}
+
+async function processRegenQueue() {
+  if (regenActive) return;  // another loop is already running
+  regenActive = true;
+  while (regenQueue.length > 0) {
+    const job = regenQueue[0];
+    // Update remaining queued badges with depth
+    regenQueue.forEach((q, i) => {
+      if (i > 0) updateLogRegenBadge(q.idx, 'queued');
+    });
+    const result = await doRegenerate(job.idx, job.params);
+    job.resolve(result);
+    regenQueue.shift();
+  }
+  regenActive = false;
+}
+
+// Track which chunk indices are currently queued/regenerating
+const regenPending = new Set();
+
+function updateRegenButton() {
+  const regenBtn = $('inspRegenerate');
+  const idx = inspState.chunkIdx;
+  if (regenPending.has(idx)) {
+    regenBtn.disabled = true;
+    regenBtn.innerHTML = '⏳ Regenerating...';
+  } else {
+    regenBtn.disabled = false;
+    regenBtn.innerHTML = '&#8635; Regenerate';
+  }
+}
+
+$('inspRegenerate').addEventListener('click', async (e) => {
+  e.stopPropagation();
+  console.log('Regenerate clicked for chunk', inspState.chunkIdx);
+  const idx = inspState.chunkIdx;
+  const chunk = state.chunks[idx];
+  if (!chunk) { console.warn('inspRegenerate: no chunk at', idx); return; }
+  if (regenPending.has(idx)) return;  // already queued
+
+  const editedText = inspectorText.value.trim();
+  if (!editedText) { inspRegenStatus.textContent = 'No text to generate'; return; }
+
+  const useInspTuning = inspRegenTuning.style.display !== 'none';
+  const params = {
+    text: editedText,
+    index: idx,
+    total: state.totalChunks,
+    temperature: useInspTuning ? parseFloat(inspSliderTemp.value) : parseFloat(sliderTemp.value),
+    top_p: useInspTuning ? parseFloat(inspSliderTopP.value) : parseFloat(sliderTopP.value),
+    top_k: useInspTuning ? parseInt(inspSliderTopK.value) : parseInt(sliderTopK.value),
+    trim_pauses: useInspTuning ? inspChkTrimPauses.checked : chkTrimPauses.checked,
+    silence_db: useInspTuning ? parseInt(inspSliderSilenceDb.value) : parseInt(sliderSilenceDb.value),
+  };
+
+  // Queue the regen job
+  regenPending.add(idx);
+  updateRegenButton();
+  const depth = regenQueue.length;
+  updateLogRegenBadge(idx, depth > 0 ? 'queued' : 'active');
+  inspRegenStatus.textContent = depth > 0 ? `Queued (#${depth + 1} in queue)` : 'Generating...';
+  inspRegenStatus.style.color = 'var(--warn)';
+
+  const resultPromise = new Promise(resolve => {
+    regenQueue.push({ idx, params, resolve });
+  });
+  processRegenQueue();  // start processing if not already running
+  const data = await resultPromise;
+
+  regenPending.delete(idx);
+  // Update button if inspector still shows this chunk
+  if (inspState.chunkIdx === idx) {
+    updateRegenButton();
+    if (data.error) {
+      inspRegenStatus.textContent = `Failed: ${data.error}`;
+      inspRegenStatus.style.color = 'var(--err)';
+    } else {
+      inspRegenStatus.textContent = `✓ Regenerated: ${data.duration}s in ${data.gen_time}s`;
+      inspRegenStatus.style.color = 'var(--success)';
+      const newChunk = state.chunks[idx];
+      const removed = (newChunk.durationRaw - newChunk.duration).toFixed(2);
+      const pct = newChunk.durationRaw > 0 ? Math.round((1 - newChunk.duration / newChunk.durationRaw) * 100) : 0;
+      let cutDetails = '';
+      if (newChunk.cuts && newChunk.cuts.length > 0) {
+        cutDetails = newChunk.cuts.map(c => {
+          const dur = (c.end_ms - c.start_ms).toFixed(0);
+          return `<span class="cut-label">${c.reason} ${dur}ms</span>`;
+        }).join(' &middot; ');
+      }
+      inspectorInfo.innerHTML = `
+        <span>Raw: ${newChunk.durationRaw.toFixed(2)}s</span>
+        <span>&rarr;</span>
+        <span>Trimmed: ${newChunk.duration.toFixed(2)}s</span>
+        <span>(removed ${removed}s / ${pct}%)</span>
+        ${cutDetails ? '<br>' + cutDetails : ''}
+      `;
+      requestAnimationFrame(() => drawInspectorWaveform(newChunk));
+    }
+  }
+});
+
+// Delete/skip chunk
+$('inspDeleteChunk').addEventListener('click', (e) => {
+  e.stopPropagation();
+  console.log('Delete chunk clicked for chunk', inspState.chunkIdx);
+  const idx = inspState.chunkIdx;
+  if (idx < 0 || !state.chunks[idx]) return;
+
+  // Mark chunk as deleted — keep the text but clear audio
+  state.chunks[idx] = {
+    ...state.chunks[idx],
+    audio: null,
+    audioRaw: null,
+    duration: 0,
+    durationRaw: 0,
+    deleted: true,
+  };
+  chunkPeaks[idx] = null;
+
+  // Update the log entry to show deleted state
+  const logEntry = logEntryMap[idx];
+  if (logEntry) {
+    logEntry.classList.add('deleted');
+    const statsEl = logEntry.querySelector('.log-stats');
+    if (statsEl) { statsEl.textContent = 'deleted'; }
+    const regenBadge = logEntry.querySelector('.log-regen-status');
+    if (regenBadge) regenBadge.innerHTML = '';
+  }
+
+  updateTotalTime();
+  updateBuffer();
+  drawWaveform();
+  downloadInfo.textContent = `${state.chunks.filter(c=>c&&c.audio).length} chunks | trimmed: ${fmtTime(totalDuration())} | raw: ${fmtTime(totalRawDuration())}`;
+  scheduleAutoSave();
+
+  closeInspector();
+});
+
+textInput.addEventListener('keydown', (e) => {
+  if ((e.ctrlKey || e.metaKey) && e.key === 'Enter' && !generateBtn.disabled) startGeneration();
+});
+
+// Keyboard shortcuts (when not typing in textarea)
+document.addEventListener('keydown', (e) => {
+  // Escape closes modals first, then cancels generation
+  if (e.code === 'Escape') {
+    if (sessionModalOverlay.classList.contains('open')) {
+      e.preventDefault();
+      closeSessionModal();
+      return;
+    }
+    if (inspectorOverlay.classList.contains('open')) {
+      e.preventDefault();
+      closeInspector();
+      return;
+    }
+    if (state.generating) {
+      e.preventDefault();
+      cancelGeneration();
+      return;
+    }
+  }
+  // Don't intercept keys when typing in any text input/textarea
+  if (e.target.tagName === 'TEXTAREA' || e.target.tagName === 'INPUT') return;
+  if (e.code === 'Space') { e.preventDefault(); playBtn.click(); }
+  else if (e.code === 'ArrowLeft') { e.preventDefault(); skipPrev(); }
+  else if (e.code === 'ArrowRight') { e.preventDefault(); skipNext(); }
+  else if (e.code === 'Home') { e.preventDefault(); seekToChunk(0); }
+  else if (e.code === 'End') { e.preventDefault(); skipEndBtn.click(); }
+});
+
+// ============================================================
+// IndexedDB Session Persistence
+// ============================================================
+const DB_NAME = 'VoiceCloneSessions';
+const DB_VERSION = 1;
+
+function openDB() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(DB_NAME, DB_VERSION);
+    req.onupgradeneeded = (e) => {
+      const db = e.target.result;
+      if (!db.objectStoreNames.contains('projects')) {
+        db.createObjectStore('projects', { keyPath: 'id' });
+      }
+      if (!db.objectStoreNames.contains('chunks')) {
+        const cs = db.createObjectStore('chunks', { keyPath: ['projectId', 'index'] });
+        cs.createIndex('byProject', 'projectId');
+      }
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+async function listProjects() {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction('projects', 'readonly');
+    const store = tx.objectStore('projects');
+    const req = store.getAll();
+    req.onsuccess = () => resolve(req.result.sort((a, b) => b.savedAt - a.savedAt));
+    req.onerror = () => reject(req.error);
+  });
+}
+
+// Convert an AudioBuffer to a WAV Blob (16-bit PCM)
+function audioBufferToWavBlob(audioBuffer) {
+  if (!audioBuffer) return null;
+  const f32 = audioBuffer.getChannelData(0);
+  const sr = audioBuffer.sampleRate;
+  const wavBuf = new ArrayBuffer(44 + f32.length * 2);
+  const v = new DataView(wavBuf);
+  const ws = (o, s) => { for (let i = 0; i < s.length; i++) v.setUint8(o+i, s.charCodeAt(i)); };
+  ws(0,'RIFF'); v.setUint32(4,36+f32.length*2,true); ws(8,'WAVE');
+  ws(12,'fmt '); v.setUint32(16,16,true); v.setUint16(20,1,true); v.setUint16(22,1,true);
+  v.setUint32(24,sr,true); v.setUint32(28,sr*2,true);
+  v.setUint16(32,2,true); v.setUint16(34,16,true);
+  ws(36,'data'); v.setUint32(40,f32.length*2,true);
+  for (let i = 0; i < f32.length; i++) {
+    const s = Math.max(-1,Math.min(1,f32[i]));
+    v.setInt16(44+i*2, s<0?s*0x8000:s*0x7FFF, true);
+  }
+  return new Blob([wavBuf], { type: 'audio/wav' });
+}
+
+// Decode a WAV Blob back to an AudioBuffer
+async function wavBlobToAudioBuffer(blob) {
+  if (!blob) return null;
+  ensureAudioCtx();
+  const arrBuf = await blob.arrayBuffer();
+  return await state.audioCtx.decodeAudioData(arrBuf);
+}
+
+// Build trimmed AudioBuffer from raw audio + cuts array
+// Removes all cut regions from the raw audio, producing a clean trimmed buffer
+function buildTrimmedAudio(chunk) {
+  if (!chunk) return null;
+  const raw = chunk.audioRaw || chunk.audio;
+  if (!raw) return null;
+  const cuts = chunk.cuts || [];
+  if (cuts.length === 0) return raw;  // no cuts — raw IS trimmed
+
+  const sr = raw.sampleRate;
+  const rawF32 = raw.getChannelData(0);
+  const rawDurMs = raw.duration * 1000;
+
+  // Sort cuts and merge overlapping
+  const sorted = cuts.slice().sort((a, b) => a.start_ms - b.start_ms);
+  const merged = [];
+  for (const c of sorted) {
+    if (merged.length > 0 && c.start_ms <= merged[merged.length - 1].end_ms) {
+      merged[merged.length - 1].end_ms = Math.max(merged[merged.length - 1].end_ms, c.end_ms);
+    } else {
+      merged.push({ start_ms: c.start_ms, end_ms: c.end_ms });
+    }
+  }
+
+  // Collect kept segments (gaps between cuts)
+  const segments = [];
+  let pos = 0;
+  for (const c of merged) {
+    if (c.start_ms > pos) {
+      segments.push({ startSample: Math.floor(pos / 1000 * sr), endSample: Math.floor(c.start_ms / 1000 * sr) });
+    }
+    pos = c.end_ms;
+  }
+  if (pos < rawDurMs) {
+    segments.push({ startSample: Math.floor(pos / 1000 * sr), endSample: rawF32.length });
+  }
+
+  // Build output buffer
+  let totalSamples = 0;
+  for (const seg of segments) totalSamples += (seg.endSample - seg.startSample);
+  if (totalSamples <= 0) return raw;  // safety: don't return empty
+
+  ensureAudioCtx();
+  const outBuf = state.audioCtx.createBuffer(1, totalSamples, sr);
+  const outF32 = outBuf.getChannelData(0);
+  let writePos = 0;
+  for (const seg of segments) {
+    const len = seg.endSample - seg.startSample;
+    outF32.set(rawF32.subarray(seg.startSample, seg.endSample), writePos);
+    writePos += len;
+  }
+  return outBuf;
+}
+
+// Current session tracking
+let currentSessionId = null;
+let currentSessionName = 'Untitled Session';
+let autoSaveTimer = null;
+let autoSaveGeneration = 0;  // increments on each change, debounces saves
+
+function flashSavedIndicator() {
+  const el = $('sessionSaved');
+  el.classList.add('visible');
+  setTimeout(() => el.classList.remove('visible'), 2000);
+}
+
+async function saveProject(name, id) {
+  const projectId = id || currentSessionId || crypto.randomUUID();
+  const db = await openDB();
+
+  // Save project metadata
+  const project = {
+    id: projectId,
+    name: name || currentSessionName,
+    savedAt: Date.now(),
+    text: textInput.value,
+    tuning: getTuningParams(),
+    sampleRate: state.sampleRate,
+    totalChunks: state.totalChunks,
+  };
+
+  const tx = db.transaction(['projects', 'chunks'], 'readwrite');
+  tx.objectStore('projects').put(project);
+
+  // Delete old chunks for this project, then write new ones
+  const chunkStore = tx.objectStore('chunks');
+  const idx = chunkStore.index('byProject');
+  const range = IDBKeyRange.only(projectId);
+  const cursorReq = idx.openCursor(range);
+  await new Promise((resolve, reject) => {
+    cursorReq.onsuccess = (e) => {
+      const cursor = e.target.result;
+      if (cursor) { cursor.delete(); cursor.continue(); }
+      else resolve();
+    };
+    cursorReq.onerror = () => reject(cursorReq.error);
+  });
+
+  // Write current chunks (including pending stubs)
+  for (let i = 0; i < state.chunks.length; i++) {
+    const c = state.chunks[i];
+    if (!c) continue;
+    const chunkRec = {
+      projectId,
+      index: i,
+      text: c.text,
+      duration: c.duration,
+      durationRaw: c.durationRaw,
+      genTime: c.genTime,
+      cuts: c.cuts || [],
+      deleted: !!c.deleted,
+      pending: !!c.pending,
+      audioBlob: (!c.pending && c.audio) ? audioBufferToWavBlob(c.audio) : null,
+      audioRawBlob: (!c.pending && c.audioRaw) ? audioBufferToWavBlob(c.audioRaw) : null,
+    };
+    chunkStore.put(chunkRec);
+  }
+
+  await new Promise((resolve, reject) => {
+    tx.oncomplete = resolve;
+    tx.onerror = () => reject(tx.error);
+  });
+
+  currentSessionId = projectId;
+  currentSessionName = project.name;
+  $('sessionName').textContent = currentSessionName;
+  flashSavedIndicator();
+  return projectId;
+}
+
+async function loadProject(projectId) {
+  const db = await openDB();
+
+  // Load project metadata
+  const project = await new Promise((resolve, reject) => {
+    const tx = db.transaction('projects', 'readonly');
+    const req = tx.objectStore('projects').get(projectId);
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+  if (!project) throw new Error('Project not found');
+
+  // Cancel any ongoing generation/playback
+  if (state.generating) cancelGeneration();
+  if (state.playing) stopAndReset();
+
+  // Load chunks
+  const chunkRecords = await new Promise((resolve, reject) => {
+    const tx = db.transaction('chunks', 'readonly');
+    const idx = tx.objectStore('chunks').index('byProject');
+    const req = idx.getAll(IDBKeyRange.only(projectId));
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+
+  // Restore state
+  textInput.value = project.text || '';
+  charCount.textContent = textInput.value.length.toLocaleString();
+  chunkEstimate.textContent = estimateChunks(textInput.value);
+
+  // Restore tuning
+  if (project.tuning) {
+    sliderTemp.value = project.tuning.temperature; valTemp.textContent = project.tuning.temperature.toFixed(2);
+    sliderTopP.value = project.tuning.top_p; valTopP.textContent = project.tuning.top_p.toFixed(2);
+    if (project.tuning.top_k !== undefined) {
+      sliderTopK.value = project.tuning.top_k; valTopK.textContent = project.tuning.top_k;
+    }
+    sliderMinChunk.value = project.tuning.min_chunk; valMinChunk.textContent = project.tuning.min_chunk;
+    sliderMaxChars.value = project.tuning.max_chars; valMaxChars.textContent = project.tuning.max_chars;
+    chkTrimPauses.checked = project.tuning.trim_pauses;
+  }
+
+  state.totalChunks = project.totalChunks;
+  state.sampleRate = project.sampleRate || 24000;
+  state.chunks = new Array(state.totalChunks).fill(null);
+  state.currentChunk = 0;
+  state.chunkPlayOffset = 0;
+  state.playStarted = false;
+  state.generating = false;
+  chunkPeaks.length = 0;
+  for (let i = 0; i < state.totalChunks; i++) chunkPeaks.push(null);
+
+  // Clear log
+  logEntries.innerHTML = '';
+  Object.keys(logEntryMap).forEach(k => delete logEntryMap[k]);
+  regenQueue.length = 0;
+
+  // Decode audio blobs back to AudioBuffers
+  ensureAudioCtx();
+  for (const rec of chunkRecords) {
+    const isPending = !!rec.pending;
+    const audio = (!isPending && rec.audioBlob) ? await wavBlobToAudioBuffer(rec.audioBlob) : null;
+    const audioRaw = (!isPending && rec.audioRawBlob) ? await wavBlobToAudioBuffer(rec.audioRawBlob) : null;
+    state.chunks[rec.index] = {
+      audio,
+      audioRaw,
+      duration: rec.duration,
+      durationRaw: rec.durationRaw,
+      cuts: rec.cuts || [],
+      text: rec.text,
+      genTime: rec.genTime,
+      index: rec.index,
+      deleted: rec.deleted,
+      pending: isPending,
+    };
+    // Extract waveform peaks
+    if (audio) {
+      const barsPerChunk = Math.max(20, Math.floor(waveformCanvas.width / state.totalChunks / 3));
+      chunkPeaks[rec.index] = extractPeaks(audio, barsPerChunk);
+    }
+    // Add log entry
+    if (isPending) {
+      addLog(rec.index, rec.text, '', false, true);
+    } else if (rec.deleted) {
+      addLog(rec.index, rec.text, 'deleted', false);
+      const entry = logEntryMap[rec.index];
+      if (entry) { entry.classList.add('deleted'); }
+    } else {
+      addLog(rec.index, rec.text, `${rec.duration.toFixed(2)}s in ${rec.genTime.toFixed(1)}s`, false);
+    }
+  }
+
+  // Update UI
+  currentSessionId = projectId;
+  currentSessionName = project.name;
+  $('sessionName').textContent = currentSessionName;
+
+  if (state.chunks.some(c => c && c.audio)) {
+    playerSection.classList.add('active');
+    logSection.classList.add('active');
+    downloadSection.classList.add('active');
+    enableTransport();
+    playBtn.classList.add('ready-pulse');
+    state.playStarted = true;
+    downloadInfo.textContent = `${state.chunks.filter(c=>c&&c.audio).length} chunks | trimmed: ${fmtTime(totalDuration())} | raw: ${fmtTime(totalRawDuration())}`;
+  }
+
+  // Init waveform AFTER sections are visible (so canvas gets proper dimensions)
+  initWaveformCanvas();
+  updateTotalTime();
+  updateBuffer();
+  drawWaveform();
+
+  // Show log section and resume bar if there are pending chunks
+  if (state.chunks.some(c => c && c.pending)) {
+    logSection.classList.add('active');
+    showResumeBar();
+  }
+
+  progressSection.classList.remove('active');
+  generateBtn.disabled = false;
+  stopBtn.style.display = 'none';
+}
+
+async function deleteProject(projectId) {
+  const db = await openDB();
+  const tx = db.transaction(['projects', 'chunks'], 'readwrite');
+  tx.objectStore('projects').delete(projectId);
+  // Delete all chunks for this project
+  const chunkStore = tx.objectStore('chunks');
+  const idx = chunkStore.index('byProject');
+  const cursorReq = idx.openCursor(IDBKeyRange.only(projectId));
+  await new Promise((resolve, reject) => {
+    cursorReq.onsuccess = (e) => {
+      const cursor = e.target.result;
+      if (cursor) { cursor.delete(); cursor.continue(); }
+      else resolve();
+    };
+    cursorReq.onerror = () => reject(cursorReq.error);
+  });
+  await new Promise((resolve, reject) => {
+    tx.oncomplete = resolve;
+    tx.onerror = () => reject(tx.error);
+  });
+  if (currentSessionId === projectId) {
+    currentSessionId = null;
+    currentSessionName = 'Untitled Session';
+    $('sessionName').textContent = currentSessionName;
+  }
+}
+
+// Auto-save: debounced — waits 2s after last change before saving
+function scheduleAutoSave() {
+  if (!currentSessionId) return;  // no session to save to
+  autoSaveGeneration++;
+  const gen = autoSaveGeneration;
+  if (autoSaveTimer) clearTimeout(autoSaveTimer);
+  autoSaveTimer = setTimeout(async () => {
+    if (gen !== autoSaveGeneration) return;  // stale
+    try {
+      await saveProject(currentSessionName, currentSessionId);
+    } catch (e) {
+      console.warn('Auto-save failed:', e);
+    }
+  }, 2000);
+}
+
+// ============================================================
+// Session Management UI
+// ============================================================
+const sessionModalOverlay = $('sessionModalOverlay');
+const sessionModalTitle = $('sessionModalTitle');
+const sessionListContainer = $('sessionListContainer');
+const sessionSaveAsRow = $('sessionSaveAsRow');
+const sessionSaveAsName = $('sessionSaveAsName');
+
+function closeSessionModal() {
+  sessionModalOverlay.classList.remove('open');
+}
+
+async function openSessionModal(mode) {
+  // mode: 'load', 'save-as'
+  sessionModalTitle.textContent = mode === 'save-as' ? 'Save Session As' : 'Saved Sessions';
+  sessionSaveAsRow.style.display = mode === 'save-as' ? 'flex' : 'none';
+  if (mode === 'save-as') {
+    sessionSaveAsName.value = currentSessionName === 'Untitled Session' ? '' : currentSessionName;
+    sessionSaveAsName.placeholder = 'Enter session name...';
+  }
+
+  // List existing sessions
+  try {
+    const projects = await listProjects();
+    if (projects.length === 0) {
+      sessionListContainer.innerHTML = '<div class="session-empty">No saved sessions yet.</div>';
+    } else {
+      const ul = document.createElement('div');
+      ul.className = 'session-list';
+      for (const p of projects) {
+        const item = document.createElement('div');
+        item.className = 'session-list-item';
+        const date = new Date(p.savedAt);
+        const timeStr = date.toLocaleDateString() + ' ' + date.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
+        item.innerHTML = `
+          <span class="sli-name">${p.name}</span>
+          <span class="sli-meta">${p.totalChunks} chunks &middot; ${timeStr}</span>
+          <button class="sli-delete" title="Delete this session">&times;</button>
+        `;
+        // Click to load
+        item.addEventListener('click', async (e) => {
+          if (e.target.classList.contains('sli-delete')) return;
+          closeSessionModal();
+          try {
+            await loadProject(p.id);
+          } catch (err) {
+            console.error('Failed to load project:', err);
+            alert('Failed to load session: ' + err.message);
+          }
+        });
+        // Delete button
+        item.querySelector('.sli-delete').addEventListener('click', async (e) => {
+          e.stopPropagation();
+          if (!confirm(`Delete session "${p.name}"?`)) return;
+          try {
+            await deleteProject(p.id);
+            item.remove();
+            const remaining = ul.querySelectorAll('.session-list-item');
+            if (remaining.length === 0) {
+              sessionListContainer.innerHTML = '<div class="session-empty">No saved sessions yet.</div>';
+            }
+          } catch (err) {
+            console.error('Failed to delete project:', err);
+          }
+        });
+        ul.appendChild(item);
+      }
+      sessionListContainer.innerHTML = '';
+      sessionListContainer.appendChild(ul);
+    }
+  } catch (e) {
+    sessionListContainer.innerHTML = '<div class="session-empty">Error loading sessions.</div>';
+    console.error('Failed to list projects:', e);
+  }
+
+  sessionModalOverlay.classList.add('open');
+}
+
+// Session bar event listeners
+$('sessionSaveAsBtn').addEventListener('click', () => openSessionModal('save-as'));
+$('sessionLoadBtn').addEventListener('click', () => openSessionModal('load'));
+$('sessionNewBtn').addEventListener('click', () => {
+  if (state.chunks.some(c => c && c.audio) && !confirm('Start a new session? Unsaved changes will be lost.')) return;
+  // Reset everything
+  if (state.generating) cancelGeneration();
+  if (state.playing) stopAndReset();
+  stopUITimer();
+  currentSessionId = null;
+  currentSessionName = 'Untitled Session';
+  $('sessionName').textContent = currentSessionName;
+  state.chunks = [];
+  state.totalChunks = 0;
+  state.currentChunk = 0;
+  state.chunkPlayOffset = 0;
+  state.playStarted = false;
+  state.totalAudioDuration = 0;
+  chunkPeaks.length = 0;
+  logEntries.innerHTML = '';
+  Object.keys(logEntryMap).forEach(k => delete logEntryMap[k]);
+  regenQueue.length = 0;
+  textInput.value = '';
+  charCount.textContent = '0';
+  chunkEstimate.textContent = '0';
+  playerSection.classList.remove('active');
+  logSection.classList.remove('active');
+  downloadSection.classList.remove('active');
+  progressSection.classList.remove('active');
+  playBtn.disabled = true;
+  playBtn.innerHTML = '&#9654;';
+  playBtn.classList.remove('ready-pulse');
+  prevChunkBtn.disabled = true;
+  nextChunkBtn.disabled = true;
+  skipStartBtn.disabled = true;
+  skipEndBtn.disabled = true;
+  nowPlaying.innerHTML = '&nbsp;';
+  timeElapsed.textContent = '0:00';
+  timeTotal.textContent = '0:00';
+  chunkInfo.textContent = 'Chunk 0 / 0';
+  initWaveformCanvas();
+  drawWaveform();
+});
+
+$('sessionModalClose').addEventListener('click', closeSessionModal);
+sessionModalOverlay.addEventListener('click', (e) => {
+  if (e.target === sessionModalOverlay) closeSessionModal();
+});
+
+// Save As confirm
+$('sessionSaveAsConfirm').addEventListener('click', async () => {
+  const name = sessionSaveAsName.value.trim();
+  if (!name) { sessionSaveAsName.focus(); return; }
+  try {
+    // Always create a new project for Save As (new ID)
+    await saveProject(name, crypto.randomUUID());
+    closeSessionModal();
+  } catch (e) {
+    console.error('Failed to save project:', e);
+    alert('Failed to save: ' + e.message);
+  }
+});
+sessionSaveAsName.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') $('sessionSaveAsConfirm').click();
+});
+
+// ============================================================
+// Export / Import (.vcsession gzip)
+// ============================================================
+async function exportSession() {
+  if (!state.chunks.some(c => c && (c.audio || c.pending))) {
+    alert('Nothing to export — generate some audio first.');
+    return;
+  }
+
+  const exportData = {
+    version: 1,
+    name: currentSessionName,
+    savedAt: Date.now(),
+    text: textInput.value,
+    tuning: getTuningParams(),
+    sampleRate: state.sampleRate,
+    totalChunks: state.totalChunks,
+    chunks: [],
+  };
+
+  for (let i = 0; i < state.chunks.length; i++) {
+    const c = state.chunks[i];
+    if (!c) { exportData.chunks.push(null); continue; }
+    const isPending = !!c.pending;
+    const audioBlob = (!isPending && c.audio) ? audioBufferToWavBlob(c.audio) : null;
+    const audioRawBlob = (!isPending && c.audioRaw) ? audioBufferToWavBlob(c.audioRaw) : null;
+    exportData.chunks.push({
+      index: i,
+      text: c.text,
+      duration: c.duration,
+      durationRaw: c.durationRaw,
+      genTime: c.genTime,
+      cuts: c.cuts || [],
+      deleted: !!c.deleted,
+      pending: isPending,
+      // Store audio as base64 of WAV bytes
+      audioB64: audioBlob ? await blobToBase64(audioBlob) : null,
+      audioRawB64: audioRawBlob ? await blobToBase64(audioRawBlob) : null,
+    });
+  }
+
+  // Serialize to JSON, compress with gzip via CompressionStream
+  const jsonStr = JSON.stringify(exportData);
+  const jsonBytes = new TextEncoder().encode(jsonStr);
+  const cs = new CompressionStream('gzip');
+  const writer = cs.writable.getWriter();
+  writer.write(jsonBytes);
+  writer.close();
+  const compressedBuf = await new Response(cs.readable).arrayBuffer();
+
+  const blob = new Blob([compressedBuf], { type: 'application/gzip' });
+  const a = document.createElement('a');
+  const safeName = (currentSessionName || 'session').replace(/[^a-zA-Z0-9_-]/g, '_');
+  a.href = URL.createObjectURL(blob);
+  a.download = `${safeName}.vcsession`;
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+
+async function importSession(file) {
+  try {
+    // Decompress gzip
+    const ds = new DecompressionStream('gzip');
+    const stream = file.stream().pipeThrough(ds);
+    const decompressed = await new Response(stream).arrayBuffer();
+    const jsonStr = new TextDecoder().decode(decompressed);
+    const data = JSON.parse(jsonStr);
+
+    if (data.version !== 1) {
+      alert('Unsupported session file version.');
+      return;
+    }
+
+    // Cancel anything in flight
+    if (state.generating) cancelGeneration();
+    if (state.playing) stopAndReset();
+
+    // Restore state
+    textInput.value = data.text || '';
+    charCount.textContent = textInput.value.length.toLocaleString();
+    chunkEstimate.textContent = estimateChunks(textInput.value);
+
+    if (data.tuning) {
+      sliderTemp.value = data.tuning.temperature; valTemp.textContent = data.tuning.temperature.toFixed(2);
+      sliderTopP.value = data.tuning.top_p; valTopP.textContent = data.tuning.top_p.toFixed(2);
+      if (data.tuning.top_k !== undefined) {
+        sliderTopK.value = data.tuning.top_k; valTopK.textContent = data.tuning.top_k;
+      }
+      sliderMinChunk.value = data.tuning.min_chunk; valMinChunk.textContent = data.tuning.min_chunk;
+      sliderMaxChars.value = data.tuning.max_chars; valMaxChars.textContent = data.tuning.max_chars;
+      chkTrimPauses.checked = data.tuning.trim_pauses;
+    }
+
+    state.totalChunks = data.totalChunks;
+    state.sampleRate = data.sampleRate || 24000;
+    state.chunks = new Array(state.totalChunks).fill(null);
+    state.currentChunk = 0;
+    state.chunkPlayOffset = 0;
+    state.playStarted = false;
+    state.generating = false;
+    chunkPeaks.length = 0;
+    for (let i = 0; i < state.totalChunks; i++) chunkPeaks.push(null);
+
+    logEntries.innerHTML = '';
+    Object.keys(logEntryMap).forEach(k => delete logEntryMap[k]);
+    regenQueue.length = 0;
+
+    ensureAudioCtx();
+    initWaveformCanvas();
+
+    for (let i = 0; i < data.chunks.length; i++) {
+      const rec = data.chunks[i];
+      if (!rec) continue;
+      const isPending = !!rec.pending;
+      const audioBlob = (!isPending && rec.audioB64) ? base64ToBlob(rec.audioB64, 'audio/wav') : null;
+      const audioRawBlob = (!isPending && rec.audioRawB64) ? base64ToBlob(rec.audioRawB64, 'audio/wav') : null;
+      const audio = audioBlob ? await wavBlobToAudioBuffer(audioBlob) : null;
+      const audioRaw = audioRawBlob ? await wavBlobToAudioBuffer(audioRawBlob) : null;
+      state.chunks[rec.index] = {
+        audio,
+        audioRaw,
+        duration: rec.duration,
+        durationRaw: rec.durationRaw,
+        cuts: rec.cuts || [],
+        text: rec.text,
+        genTime: rec.genTime,
+        index: rec.index,
+        deleted: rec.deleted,
+        pending: isPending,
+      };
+      if (audio) {
+        const barsPerChunk = Math.max(20, Math.floor(waveformCanvas.width / state.totalChunks / 3));
+        chunkPeaks[rec.index] = extractPeaks(audio, barsPerChunk);
+      }
+      if (isPending) {
+        addLog(rec.index, rec.text, '', false, true);
+      } else if (rec.deleted) {
+        addLog(rec.index, rec.text, 'deleted', false);
+        const entry = logEntryMap[rec.index];
+        if (entry) entry.classList.add('deleted');
+      } else {
+        addLog(rec.index, rec.text, `${rec.duration.toFixed(2)}s in ${rec.genTime.toFixed(1)}s`, false);
+      }
+    }
+
+    currentSessionId = null;  // imported sessions aren't linked to IDB yet
+    currentSessionName = data.name || 'Imported Session';
+    $('sessionName').textContent = currentSessionName;
+
+    updateTotalTime();
+    updateBuffer();
+    drawWaveform();
+
+    if (state.chunks.some(c => c && c.audio)) {
+      playerSection.classList.add('active');
+      logSection.classList.add('active');
+      downloadSection.classList.add('active');
+      enableTransport();
+      playBtn.classList.add('ready-pulse');
+      state.playStarted = true;
+      downloadInfo.textContent = `${state.chunks.filter(c=>c&&c.audio).length} chunks | trimmed: ${fmtTime(totalDuration())} | raw: ${fmtTime(totalRawDuration())}`;
+    }
+
+    // Show log section if there are pending chunks (even without audio)
+    if (state.chunks.some(c => c && c.pending)) {
+      logSection.classList.add('active');
+      showResumeBar();
+    }
+
+    progressSection.classList.remove('active');
+    generateBtn.disabled = false;
+    stopBtn.style.display = 'none';
+
+  } catch (e) {
+    console.error('Import failed:', e);
+    alert('Failed to import session: ' + e.message);
+  }
+}
+
+function blobToBase64(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onloadend = () => {
+      const dataUrl = reader.result;
+      resolve(dataUrl.split(',')[1]);
+    };
+    reader.onerror = reject;
+    reader.readAsDataURL(blob);
+  });
+}
+
+function base64ToBlob(b64, type) {
+  const bin = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return new Blob([bytes], { type });
+}
+
+$('sessionExportBtn').addEventListener('click', () => exportSession());
+$('sessionImportBtn').addEventListener('click', () => $('sessionImportFile').click());
+$('sessionImportFile').addEventListener('change', (e) => {
+  const file = e.target.files[0];
+  if (file) importSession(file);
+  e.target.value = '';  // reset so same file can be re-imported
+});
+
+// ============================================================
+// Resume Generation
+// ============================================================
+let resumeAbort = false;
+
+function showResumeBar() {
+  const pendingCount = state.chunks.filter(c => c && c.pending).length;
+  if (pendingCount === 0) { hideResumeBar(); return; }
+  const completedCount = state.chunks.filter(c => c && c.audio && !c.pending).length;
+  $('resumeInfo').textContent = `${pendingCount} of ${state.totalChunks} chunks pending`;
+  $('resumeBar').style.display = 'flex';
+  $('resumeBtn').style.display = '';
+  $('resumeStopBtn').style.display = 'none';
+}
+
+function hideResumeBar() {
+  $('resumeBar').style.display = 'none';
+}
+
+async function resumeGeneration() {
+  const pendingIndices = [];
+  for (let i = 0; i < state.chunks.length; i++) {
+    if (state.chunks[i] && state.chunks[i].pending) pendingIndices.push(i);
+  }
+  if (pendingIndices.length === 0) { hideResumeBar(); return; }
+
+  resumeAbort = false;
+  state.generating = true;
+  generateBtn.disabled = true;
+  $('resumeBtn').style.display = 'none';
+  $('resumeStopBtn').style.display = '';
+  progressSection.classList.add('active');
+  playerSection.classList.add('active');
+  logSection.classList.add('active');
+  downloadSection.classList.remove('active');
+
+  const tuning = getTuningParams();
+  let completed = 0;
+
+  for (const idx of pendingIndices) {
+    if (resumeAbort) break;
+
+    const chunk = state.chunks[idx];
+    if (!chunk || !chunk.pending) continue;
+
+    // Update badge to generating
+    updateLogRegenBadge(idx, 'active');
+
+    // Update progress
+    const pct = ((state.chunks.filter(c => c && c.audio && !c.pending).length) / state.totalChunks * 100);
+    progressBar.style.width = `${pct}%`;
+    progressText.textContent = `Resuming chunk ${idx + 1} of ${state.totalChunks}...`;
+    $('resumeInfo').textContent = `Generating ${idx + 1}/${state.totalChunks} (${pendingIndices.length - completed} remaining)`;
+
+    try {
+      const resp = await fetch('/regenerate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          text: chunk.text,
+          index: idx,
+          total: state.totalChunks,
+          ...tuning,
+        }),
+      });
+      const data = await resp.json();
+
+      if (data.error) {
+        updateLogRegenBadge(idx, 'failed');
+        console.error(`Resume chunk ${idx} failed:`, data.error);
+        continue;
+      }
+
+      // Decode and replace pending stub
+      const audioBuffer = await decodeB64Audio(data.audio_b64);
+      const rawAudioBuffer = data.audio_raw_b64 ? await decodeB64Audio(data.audio_raw_b64) : null;
+      state.chunks[idx] = {
+        audio: audioBuffer,
+        audioRaw: rawAudioBuffer,
+        duration: data.duration,
+        durationRaw: data.duration_raw || data.duration,
+        cuts: data.cuts || [],
+        text: chunk.text,
+        genTime: data.gen_time,
+        index: idx,
+      };
+      const barsPerChunk = Math.max(20, Math.floor(waveformCanvas.width / state.totalChunks / 3));
+      chunkPeaks[idx] = extractPeaks(audioBuffer, barsPerChunk);
+
+      // Update log entry in-place
+      const logEntry = logEntryMap[idx];
+      if (logEntry) {
+        const statsEl = logEntry.querySelector('.log-stats');
+        if (statsEl) { statsEl.textContent = `${data.duration}s in ${data.gen_time}s`; statsEl.className = 'log-stats'; }
+        const regenEl = logEntry.querySelector('.log-regen-status');
+        if (regenEl) regenEl.innerHTML = '';
+      }
+
+      updateTotalTime();
+      updateBuffer();
+      drawWaveform();
+      maybeAutoPlay();
+      scheduleAutoSave();
+      completed++;
+
+      // Enable transport once we have audio
+      if (!state.playStarted && state.chunks.some(c => c && c.audio)) {
+        enableTransport();
+        state.playStarted = true;
+      }
+
+    } catch (e) {
+      if (resumeAbort) break;
+      updateLogRegenBadge(idx, 'failed');
+      console.error(`Resume chunk ${idx} error:`, e);
+    }
+  }
+
+  // Done or cancelled
+  state.generating = false;
+  generateBtn.disabled = false;
+
+  const remainingPending = state.chunks.filter(c => c && c.pending).length;
+  if (remainingPending > 0) {
+    showResumeBar();
+    progressEta.textContent = resumeAbort ? 'Stopped' : 'Paused';
+  } else {
+    hideResumeBar();
+    progressEta.textContent = 'Done';
+  }
+
+  const pct = ((state.chunks.filter(c => c && c.audio && !c.pending).length) / state.totalChunks * 100);
+  progressBar.style.width = `${pct}%`;
+  progressText.textContent = remainingPending > 0
+    ? `${state.chunks.filter(c => c && c.audio).length} of ${state.totalChunks} chunks complete`
+    : 'Generation complete';
+
+  if (state.chunks.some(c => c && c.audio)) {
+    enableTransport();
+    downloadSection.classList.add('active');
+    downloadInfo.textContent = `${state.chunks.filter(c=>c&&c.audio).length} chunks | trimmed: ${fmtTime(totalDuration())} | raw: ${fmtTime(totalRawDuration())}`;
+  }
+}
+
+function cancelResume() {
+  resumeAbort = true;
+}
+
+$('resumeBtn').addEventListener('click', () => resumeGeneration());
+$('resumeStopBtn').addEventListener('click', () => cancelResume());
+
+// ============================================================
+// Init
+// ============================================================
+const DEFAULT_TEXT = `The Raven
+by Edgar Allan Poe
+
+Once upon a midnight dreary, while I pondered, weak and weary,
+Over many a quaint and curious volume of forgotten lore—
+While I nodded, nearly napping, suddenly there came a tapping,
+As of some one gently rapping, rapping at my chamber door.
+"'Tis some visitor," I muttered, "tapping at my chamber door—
+Only this and nothing more."
+
+Ah, distinctly I remember it was in the bleak December;
+And each separate dying ember wrought its ghost upon the floor.
+Eagerly I wished the morrow;—vainly I had sought to borrow
+From my books surcease of sorrow—sorrow for the lost Lenore—
+For the rare and radiant maiden whom the angels name Lenore—
+Nameless here for evermore.
+
+And the silken, sad, uncertain rustling of each purple curtain
+Thrilled me—filled me with fantastic terrors never felt before;
+So that now, to still the beating of my heart, I stood repeating
+"'Tis some visitor entreating entrance at my chamber door—
+Some late visitor entreating entrance at my chamber door;—
+This it is and nothing more."
+
+Presently my soul grew stronger; hesitating then no longer,
+"Sir," said I, "or Madam, truly your forgiveness I implore;
+But the fact is I was napping, and so gently you came rapping,
+And so faintly you came tapping, tapping at my chamber door,
+That I scarce was sure I heard you"—here I opened wide the door;—
+Darkness there and nothing more.
+
+Deep into that darkness peering, long I stood there wondering, fearing,
+Doubting, dreaming dreams no mortal ever dared to dream before;
+But the silence was unbroken, and the stillness gave no token,
+And the only word there spoken was the whispered word, "Lenore?"
+This I whispered, and an echo murmured back the word, "Lenore!"—
+Merely this and nothing more.
+
+Back into the chamber turning, all my soul within me burning,
+Soon again I heard a tapping somewhat louder than before.
+"Surely," said I, "surely that is something at my window lattice;
+Let me see, then, what thereat is, and this mystery explore—
+Let my heart be still a moment and this mystery explore;—
+'Tis the wind and nothing more!"
+
+Open here I flung the shutter, when, with many a flirt and flutter,
+In there stepped a stately Raven of the saintly days of yore;
+Not the least obeisance made he; not a minute stopped or stayed he;
+But, with mien of lord or lady, perched above my chamber door—
+Perched upon a bust of Pallas just above my chamber door—
+Perched, and sat, and nothing more.
+
+Then this ebony bird beguiling my sad fancy into smiling,
+By the grave and stern decorum of the countenance it wore,
+"Though thy crest be shorn and shaven, thou," I said, "art sure no craven,
+Ghastly grim and ancient Raven wandering from the Nightly shore—
+Tell me what thy lordly name is on the Night's Plutonian shore!"
+Quoth the Raven "Nevermore."
+
+Much I marvelled this ungainly fowl to hear discourse so plainly,
+Though its answer little meaning—little relevancy bore;
+For we cannot help agreeing that no living human being
+Ever yet was blessed with seeing bird above his chamber door—
+Bird or beast upon the sculptured bust above his chamber door,
+With such name as "Nevermore."
+
+But the Raven, sitting lonely on the placid bust, spoke only
+That one word, as if his soul in that one word he did outpour.
+Nothing farther then he uttered—not a feather then he fluttered—
+Till I scarcely more than muttered "Other friends have flown before—
+On the morrow he will leave me, as my Hopes have flown before."
+Then the bird said "Nevermore."
+
+Startled at the stillness broken by reply so aptly spoken,
+"Doubtless," said I, "what it utters is its only stock and store
+Caught from some unhappy master whom unmerciful Disaster
+Followed fast and followed faster till his songs one burden bore—
+Till the dirges of his Hope that melancholy burden bore
+Of 'Never—nevermore'."
+
+But the Raven still beguiling all my fancy into smiling,
+Straight I wheeled a cushioned seat in front of bird, and bust and door;
+Then, upon the velvet sinking, I betook myself to linking
+Fancy unto fancy, thinking what this ominous bird of yore—
+What this grim, ungainly, ghastly, gaunt, and ominous bird of yore
+Meant in croaking "Nevermore."
+
+This I sat engaged in guessing, but no syllable expressing
+To the fowl whose fiery eyes now burned into my bosom's core;
+This and more I sat divining, with my head at ease reclining
+On the cushion's velvet lining that the lamp-light gloated o'er,
+But whose velvet-violet lining with the lamp-light gloating o'er,
+She shall press, ah, nevermore!
+
+Then, methought, the air grew denser, perfumed from an unseen censer
+Swung by Seraphim whose foot-falls tinkled on the tufted floor.
+"Wretch," I cried, "thy God hath lent thee—by these angels he hath sent thee
+Respite—respite and nepenthe from thy memories of Lenore;
+Quaff, oh quaff this kind nepenthe and forget this lost Lenore!"
+Quoth the Raven "Nevermore."
+
+"Prophet!" said I, "thing of evil!—prophet still, if bird or devil!—
+Whether Tempter sent, or whether tempest tossed thee here ashore,
+Desolate yet all undaunted, on this desert land enchanted—
+On this home by Horror haunted—tell me truly, I implore—
+Is there—is there balm in Gilead?—tell me—tell me, I implore!"
+Quoth the Raven "Nevermore."
+
+"Prophet!" said I, "thing of evil!—prophet still, if bird or devil!
+By that Heaven that bends above us—by that God we both adore—
+Tell this soul with sorrow laden if, within the distant Aidenn,
+It shall clasp a sainted maiden whom the angels name Lenore—
+Clasp a rare and radiant maiden whom the angels name Lenore."
+Quoth the Raven "Nevermore."
+
+"Be that word our sign of parting, bird or fiend!" I shrieked, upstarting—
+"Get thee back into the tempest and the Night's Plutonian shore!
+Leave no black plume as a token of that lie thy soul hath spoken!
+Leave my loneliness unbroken!—quit the bust above my door!
+Take thy beak from out my heart, and take thy form from off my door!"
+Quoth the Raven "Nevermore."
+
+And the Raven, never flitting, still is sitting, still is sitting
+On the pallid bust of Pallas just above my chamber door;
+And his eyes have all the seeming of a demon's that is dreaming,
+And the lamp-light o'er him streaming throws his shadow on the floor;
+And my soul from out that shadow that lies floating on the floor
+Shall be lifted—nevermore!`;
+
+textInput.value = DEFAULT_TEXT;
+charCount.textContent = DEFAULT_TEXT.length.toLocaleString();
+chunkEstimate.textContent = estimateChunks(DEFAULT_TEXT);
+
+initWaveformCanvas();
+checkStatus();
+</script>
+</body>
+</html>
