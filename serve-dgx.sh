@@ -71,6 +71,7 @@ exec uv run \
     --with f5-tts \
     --with torch \
     --with torchaudio \
+    --with faster-whisper \
     python3 web_tts_server.py \
     --port "$PORT" \
     --model "$MODEL" \

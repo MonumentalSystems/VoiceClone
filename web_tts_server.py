@@ -56,6 +56,72 @@ _ref_lock = threading.Lock()
 MAX_REF_DURATION_S = 12.0
 MAX_REF_UPLOAD_BYTES = 25 * 1024 * 1024  # 25 MB cap on raw upload payload
 
+# Whisper transcription (faster-whisper). Lazy-loaded on first /transcribe.
+MAX_TRANSCRIBE_DURATION_S = 60.0
+MAX_TRANSCRIBE_UPLOAD_BYTES = 50 * 1024 * 1024
+DEFAULT_WHISPER_MODEL = "Systran/faster-whisper-base.en"
+_whisper_models = {}  # name -> WhisperModel
+_whisper_lock = threading.Lock()
+
+
+def _get_whisper_model(name=None):
+    """Lazy-load and cache a faster-whisper model. Thread-safe."""
+    name = name or DEFAULT_WHISPER_MODEL
+    with _whisper_lock:
+        if name in _whisper_models:
+            return _whisper_models[name]
+        from faster_whisper import WhisperModel
+        # Auto-pick device. faster-whisper uses ctranslate2 — which on some
+        # platforms (notably the DGX Spark CUDA 13 / arm64 wheel) is shipped
+        # *without* CUDA support. Probe by trying to load CUDA first and
+        # silently fall back to CPU if CT2 was built CPU-only.
+        candidates = []
+        try:
+            import torch as _torch
+            if _torch.cuda.is_available():
+                candidates.append(("cuda", "float16"))
+        except Exception:
+            pass
+        candidates.append(("cpu", "int8"))
+        last_err = None
+        for device, compute_type in candidates:
+            try:
+                print(f"  Loading Whisper model {name} on {device} ({compute_type})…")
+                t0 = time.time()
+                model = WhisperModel(name, device=device, compute_type=compute_type)
+                print(f"  Whisper model loaded in {time.time() - t0:.1f}s ({device})")
+                _whisper_models[name] = model
+                return model
+            except Exception as e:
+                last_err = e
+                msg = str(e)
+                # Typical message: "This CTranslate2 package was not compiled with CUDA support".
+                if "CUDA" in msg or "cuda" in msg:
+                    print(f"  Whisper CUDA load failed ({msg.strip()[:120]}); falling back to CPU.")
+                    continue
+                raise
+        raise RuntimeError(f"Could not load Whisper model on any device: {last_err}")
+
+
+def _transcribe_audio_np(audio_np, sample_rate, model_name=None):
+    """Run faster-whisper on a numpy float32 mono buffer. Returns (text, language)."""
+    model = _get_whisper_model(model_name)
+    # faster-whisper accepts a numpy float32 array directly (resampled to 16k internally
+    # when sample_rate != 16000 isn't accepted — feed 16k for best results).
+    if sample_rate != 16000:
+        ratio = 16000 / float(sample_rate)
+        new_len = int(round(len(audio_np) * ratio))
+        x_old = np.linspace(0.0, 1.0, num=len(audio_np), endpoint=False, dtype=np.float64)
+        x_new = np.linspace(0.0, 1.0, num=new_len, endpoint=False, dtype=np.float64)
+        audio_16k = np.interp(x_new, x_old, audio_np).astype(np.float32, copy=False)
+    else:
+        audio_16k = audio_np.astype(np.float32, copy=False)
+    segments, info = model.transcribe(audio_16k, beam_size=5, language=None if "en" not in (model_name or DEFAULT_WHISPER_MODEL) else "en")
+    text = " ".join(seg.text.strip() for seg in segments).strip()
+    # Collapse internal whitespace
+    text = re.sub(r"\s+", " ", text)
+    return text, getattr(info, "language", "en")
+
 # Per-request cancellation: maps request_id → threading.Event (set = cancelled)
 _cancel_events = {}  # type: dict[str, threading.Event]
 _cancel_lock = threading.Lock()
@@ -1779,6 +1845,67 @@ class TTSHandler(BaseHTTPRequestHandler):
                 'total': len(chunks),
             }).encode())
 
+        elif self.path.startswith('/transcribe'):
+            # Parse optional ?model=... query param.
+            from urllib.parse import urlparse, parse_qs
+            qs = parse_qs(urlparse(self.path).query)
+            model_name = (qs.get('model') or [DEFAULT_WHISPER_MODEL])[0]
+            content_type = self.headers.get('Content-Type', '')
+            content_len = int(self.headers.get('Content-Length', 0))
+
+            def _err(code, msg):
+                self.send_response(code)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                self.wfile.write(json.dumps({'error': msg}).encode())
+
+            if content_len <= 0 or content_len > MAX_TRANSCRIBE_UPLOAD_BYTES:
+                _err(400, f"Upload missing or too large (>{MAX_TRANSCRIBE_UPLOAD_BYTES // (1024*1024)} MB).")
+                return
+            if 'multipart/form-data' not in content_type.lower():
+                _err(400, "Expected multipart/form-data with an 'audio' field.")
+                return
+            body = self.rfile.read(content_len)
+            try:
+                parts = _parse_multipart(body, content_type)
+            except Exception as e:
+                _err(400, f"Could not parse multipart body: {e}")
+                return
+            if 'audio' not in parts or not parts['audio'][1]:
+                _err(400, "Missing 'audio' file field.")
+                return
+            audio_filename, audio_bytes = parts['audio']
+            try:
+                audio_np, duration = _decode_audio_to_24k_mono(audio_bytes, audio_filename)
+            except ValueError as e:
+                _err(400, str(e))
+                return
+            except Exception as e:
+                _err(400, f"Audio decode failed: {e}")
+                return
+            if duration > MAX_TRANSCRIBE_DURATION_S:
+                _err(400, f"Audio is {duration:.1f}s; max allowed is {MAX_TRANSCRIBE_DURATION_S:.0f}s for transcription.")
+                return
+            try:
+                t0 = time.time()
+                text, language = _transcribe_audio_np(audio_np, SAMPLE_RATE, model_name=model_name)
+                dt = time.time() - t0
+                print(f"  /transcribe: {duration:.2f}s audio → {len(text)} chars in {dt:.2f}s (model={model_name})")
+            except Exception as e:
+                _err(500, f"Transcription failed: {e}")
+                return
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            self.wfile.write(json.dumps({
+                'transcript': text,
+                'duration': round(duration, 2),
+                'language': language,
+                'model': model_name,
+            }).encode())
+
         elif self.path == '/reference':
             global REF_AUDIO_DATA, REF_TEXT, REF_NAME
             content_type = self.headers.get('Content-Type', '')
@@ -1820,14 +1947,18 @@ class TTSHandler(BaseHTTPRequestHandler):
             if 'audio' not in parts or not parts['audio'][1]:
                 _err(400, "Missing 'audio' file field.")
                 return
-            if 'transcript' not in parts:
-                _err(400, "Missing 'transcript' text field.")
-                return
 
             audio_filename, audio_bytes = parts['audio']
-            transcript = parts['transcript'][1].decode('utf-8', errors='replace').strip()
-            if not transcript:
-                _err(400, "Transcript is required.")
+            transcript = ''
+            if 'transcript' in parts:
+                transcript = parts['transcript'][1].decode('utf-8', errors='replace').strip()
+            auto_flag = ''
+            if 'auto_transcribe' in parts:
+                auto_flag = parts['auto_transcribe'][1].decode('utf-8', errors='replace').strip().lower()
+            auto_transcribe = auto_flag in ('1', 'true', 'yes', 'on')
+
+            if not transcript and not auto_transcribe:
+                _err(400, "Transcript is required (or pass auto_transcribe=true).")
                 return
 
             try:
@@ -1842,6 +1973,19 @@ class TTSHandler(BaseHTTPRequestHandler):
             if duration > MAX_REF_DURATION_S:
                 _err(400, f"Reference clip is {duration:.1f}s; max allowed is {MAX_REF_DURATION_S:.0f}s.")
                 return
+
+            # Auto-transcribe if requested and no transcript was supplied.
+            if auto_transcribe and not transcript:
+                try:
+                    t0 = time.time()
+                    transcript, _lang = _transcribe_audio_np(audio_np, SAMPLE_RATE)
+                    print(f"  /reference auto-transcribed in {time.time() - t0:.2f}s: {transcript[:60]!r}")
+                except Exception as e:
+                    _err(500, f"Auto-transcription failed: {e}")
+                    return
+                if not transcript:
+                    _err(400, "Auto-transcription returned empty text; please supply a transcript manually.")
+                    return
 
             # Run the same cleanup pipeline used per-chunk: leading/trailing
             # silence trim, fades, 80 Hz highpass, -1 dB normalize. Keeps

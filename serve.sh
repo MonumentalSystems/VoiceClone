@@ -56,7 +56,7 @@ echo
 export PYTHONUNBUFFERED=1
 
 exec uv run --python 3.11 \
-    --with f5-tts --with torch --with torchaudio \
+    --with f5-tts --with torch --with torchaudio --with faster-whisper \
     python3 web_tts_server.py \
     --port "$PORT" \
     --device "$DEVICE" \

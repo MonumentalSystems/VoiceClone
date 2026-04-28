@@ -470,15 +470,26 @@
     </div>
     <div class="voice-body" id="voiceBody">
       <div style="font-size:0.75rem; color:var(--text-dim); margin-bottom:0.6rem;">
-        Upload a clean clip (under 12s) and its transcript to swap the active F5-TTS reference voice. Lives until server restart.
+        Upload a clean clip (under 12s) <i>or</i> record one from your mic, then transcribe it (or type the transcript) and apply. Lives until server restart.
       </div>
       <div class="voice-row">
         <label for="voiceFile">Audio</label>
         <input type="file" id="voiceFile" accept="audio/*">
+        <button class="btn" id="voiceRecBtn" type="button">● Record</button>
+        <span id="voiceRecState" style="font-size:0.75rem; color:var(--text-dim);"></span>
+      </div>
+      <div class="voice-row" id="voiceRecHint" style="display:none;">
+        <label></label>
+        <span style="font-size:0.72rem; color:var(--text-dim);">Recording requires HTTPS or localhost; upload a file instead.</span>
+      </div>
+      <div class="voice-row" id="voicePreviewRow" style="display:none;">
+        <label>Preview</label>
+        <audio id="voicePreview" controls style="flex:1; max-width:100%;"></audio>
+        <button class="btn" id="voiceTranscribeBtn" type="button">Auto-transcribe</button>
       </div>
       <div class="voice-row">
         <label for="voiceTranscript">Transcript</label>
-        <textarea id="voiceTranscript" placeholder="Exact words spoken in the clip — punctuation matters."></textarea>
+        <textarea id="voiceTranscript" placeholder="Exact words spoken in the clip — punctuation matters. Edit freely after auto-transcribe."></textarea>
       </div>
       <div class="voice-row" style="justify-content:flex-end;">
         <button class="btn btn-primary" id="voiceUseBtn" disabled>Use this voice</button>
@@ -2427,6 +2438,45 @@ const voiceHeader = $('voiceHeader'), voiceBody = $('voiceBody'), voiceToggle = 
 const voiceFile = $('voiceFile'), voiceTranscript = $('voiceTranscript');
 const voiceUseBtn = $('voiceUseBtn'), voiceStatus = $('voiceStatus');
 const voiceActiveName = $('voiceActiveName');
+const voiceRecBtn = $('voiceRecBtn'), voiceRecState = $('voiceRecState');
+const voiceRecHint = $('voiceRecHint');
+const voicePreviewRow = $('voicePreviewRow'), voicePreview = $('voicePreview');
+const voiceTranscribeBtn = $('voiceTranscribeBtn');
+
+// "Candidate clip" — either an uploaded File or a recorded Blob.
+// Whichever is most recent wins.
+let voiceCandidate = null;          // Blob or File
+let voiceCandidateName = '';        // display name
+let voiceCandidateUrl = null;       // object URL for preview
+let voiceMediaRecorder = null;
+let voiceRecChunks = [];
+let voiceRecTimer = null;
+let voiceRecAutoStop = null;
+let voiceRecStart = 0;
+const VOICE_REC_MAX_MS = 12000;
+
+function setVoiceCandidate(blob, name) {
+  voiceCandidate = blob;
+  voiceCandidateName = name || (blob && blob.name) || 'clip';
+  if (voiceCandidateUrl) { try { URL.revokeObjectURL(voiceCandidateUrl); } catch(_) {} }
+  voiceCandidateUrl = blob ? URL.createObjectURL(blob) : null;
+  if (voiceCandidateUrl) {
+    voicePreview.src = voiceCandidateUrl;
+    voicePreviewRow.style.display = '';
+  } else {
+    voicePreview.removeAttribute('src');
+    voicePreviewRow.style.display = 'none';
+  }
+  refreshVoiceBtn();
+}
+
+// Hide Record button if MediaRecorder/getUserMedia unavailable.
+const _canRecord = !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia
+                      && window.MediaRecorder && window.isSecureContext);
+if (!_canRecord) {
+  voiceRecBtn.style.display = 'none';
+  voiceRecHint.style.display = '';
+}
 
 function updateVoiceStatus(data) {
   if (data && data.ref_name) {
@@ -2444,23 +2494,137 @@ voiceHeader.addEventListener('click', () => {
 });
 
 function refreshVoiceBtn() {
-  voiceUseBtn.disabled = !(voiceFile.files && voiceFile.files[0]
-                           && voiceTranscript.value.trim().length > 0);
+  const hasClip = !!voiceCandidate;
+  voiceUseBtn.disabled = !(hasClip && voiceTranscript.value.trim().length > 0);
+  voiceTranscribeBtn.disabled = !hasClip;
 }
-voiceFile.addEventListener('change', refreshVoiceBtn);
+voiceFile.addEventListener('change', () => {
+  const f = voiceFile.files && voiceFile.files[0];
+  if (f) setVoiceCandidate(f, f.name);
+  else setVoiceCandidate(null, '');
+});
 voiceTranscript.addEventListener('input', refreshVoiceBtn);
 
+// ── Browser recording via MediaRecorder ─────────────────────────
+function _stopVoiceRecording(cancelled) {
+  if (voiceRecTimer) { clearInterval(voiceRecTimer); voiceRecTimer = null; }
+  if (voiceRecAutoStop) { clearTimeout(voiceRecAutoStop); voiceRecAutoStop = null; }
+  if (voiceMediaRecorder && voiceMediaRecorder.state !== 'inactive') {
+    try { voiceMediaRecorder.stop(); } catch(_) {}
+  }
+  // Stop the underlying tracks.
+  if (voiceMediaRecorder && voiceMediaRecorder.stream) {
+    for (const t of voiceMediaRecorder.stream.getTracks()) {
+      try { t.stop(); } catch(_) {}
+    }
+  }
+  voiceRecBtn.textContent = '● Record';
+  voiceRecBtn.classList.remove('btn-stop');
+}
+
+async function _startVoiceRecording() {
+  // If already recording, treat the click as Stop.
+  if (voiceMediaRecorder && voiceMediaRecorder.state === 'recording') {
+    _stopVoiceRecording(false);
+    return;
+  }
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  } catch (e) {
+    voiceStatus.className = 'voice-status err';
+    voiceStatus.textContent = `Mic access denied: ${e.message || e}`;
+    return;
+  }
+  voiceRecChunks = [];
+  let mime = '';
+  for (const m of ['audio/webm;codecs=opus', 'audio/webm', 'audio/ogg;codecs=opus', 'audio/ogg']) {
+    if (window.MediaRecorder && MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(m)) { mime = m; break; }
+  }
+  try {
+    voiceMediaRecorder = mime ? new MediaRecorder(stream, { mimeType: mime })
+                              : new MediaRecorder(stream);
+  } catch (e) {
+    voiceStatus.className = 'voice-status err';
+    voiceStatus.textContent = `MediaRecorder failed: ${e.message || e}`;
+    for (const t of stream.getTracks()) { try { t.stop(); } catch(_) {} }
+    return;
+  }
+  voiceMediaRecorder.addEventListener('dataavailable', (ev) => {
+    if (ev.data && ev.data.size > 0) voiceRecChunks.push(ev.data);
+  });
+  voiceMediaRecorder.addEventListener('stop', () => {
+    const type = (voiceMediaRecorder && voiceMediaRecorder.mimeType) || mime || 'audio/webm';
+    const blob = new Blob(voiceRecChunks, { type });
+    voiceRecChunks = [];
+    voiceRecState.textContent = '';
+    if (blob.size > 0) {
+      const ext = type.includes('ogg') ? 'ogg' : 'webm';
+      // Name it with the extension so the server's filename hint is sane.
+      const named = new File([blob], `recording.${ext}`, { type });
+      setVoiceCandidate(named, named.name);
+      // Clear the file input so it doesn't conflict.
+      try { voiceFile.value = ''; } catch(_) {}
+      voiceStatus.className = 'voice-status';
+      voiceStatus.textContent = `Recorded ${(blob.size / 1024).toFixed(1)} KB.`;
+    }
+  });
+  voiceRecStart = Date.now();
+  voiceMediaRecorder.start();
+  voiceRecBtn.textContent = '■ Stop';
+  voiceRecBtn.classList.add('btn-stop');
+  voiceRecState.textContent = '● 0.0s';
+  voiceRecState.style.color = '#e44';
+  voiceRecTimer = setInterval(() => {
+    const t = (Date.now() - voiceRecStart) / 1000;
+    voiceRecState.textContent = `● ${t.toFixed(1)}s`;
+    if (t >= VOICE_REC_MAX_MS / 1000) _stopVoiceRecording(false);
+  }, 100);
+  voiceRecAutoStop = setTimeout(() => _stopVoiceRecording(false), VOICE_REC_MAX_MS);
+}
+
+voiceRecBtn.addEventListener('click', _startVoiceRecording);
+
+// ── Auto-transcribe ─────────────────────────────────────────────
+voiceTranscribeBtn.addEventListener('click', async () => {
+  if (!voiceCandidate) return;
+  voiceTranscribeBtn.disabled = true;
+  const oldLabel = voiceTranscribeBtn.textContent;
+  voiceTranscribeBtn.textContent = 'Transcribing…';
+  voiceStatus.className = 'voice-status';
+  voiceStatus.textContent = 'Transcribing (first call may load the Whisper model)…';
+  try {
+    const fd = new FormData();
+    fd.append('audio', voiceCandidate, voiceCandidateName);
+    const resp = await fetch('/transcribe', { method: 'POST', body: fd });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      voiceStatus.className = 'voice-status err';
+      voiceStatus.textContent = data.error || `Transcribe failed (${resp.status})`;
+    } else {
+      voiceTranscript.value = data.transcript || '';
+      voiceStatus.className = 'voice-status ok';
+      voiceStatus.textContent = `Transcribed ${data.duration}s clip. Edit if needed, then Apply.`;
+    }
+  } catch (e) {
+    voiceStatus.className = 'voice-status err';
+    voiceStatus.textContent = `Transcribe failed: ${e.message || e}`;
+  } finally {
+    voiceTranscribeBtn.textContent = oldLabel;
+    refreshVoiceBtn();
+  }
+});
+
 voiceUseBtn.addEventListener('click', async () => {
-  const f = voiceFile.files && voiceFile.files[0];
   const transcript = voiceTranscript.value.trim();
-  if (!f || !transcript) return;
+  if (!voiceCandidate || !transcript) return;
 
   voiceStatus.className = 'voice-status';
   voiceStatus.textContent = 'Uploading…';
   voiceUseBtn.disabled = true;
 
   const fd = new FormData();
-  fd.append('audio', f);
+  fd.append('audio', voiceCandidate, voiceCandidateName);
   fd.append('transcript', transcript);
 
   try {
@@ -2473,6 +2637,11 @@ voiceUseBtn.addEventListener('click', async () => {
       voiceStatus.className = 'voice-status ok';
       voiceStatus.textContent = `Active voice: ${data.ref_name} (${data.duration}s).`;
       updateVoiceStatus(data);
+      // Also pick up any /status fields the rest of the UI cares about.
+      try {
+        const s = await (await fetch('/status')).json();
+        if (s) updateVoiceStatus(s);
+      } catch(_) {}
     }
   } catch (e) {
     voiceStatus.className = 'voice-status err';
