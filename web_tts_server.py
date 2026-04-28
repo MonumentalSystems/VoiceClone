@@ -1427,7 +1427,10 @@ class TTSHandler(BaseHTTPRequestHandler):
             # keep every worker process busy — otherwise the workers idle
             # while the handler trickles jobs one at a time.
             if _worker_pool is not None:
-                parallel = min(NUM_GEN_WORKERS, total) if total > 1 else 1
+                # Submit enough chunks concurrently to fill every worker's
+                # batch slot — otherwise the per-worker drain finds only one
+                # item and tensor batching never engages.
+                parallel = min(max(NUM_GEN_WORKERS, 1) * max(MAX_BATCH, 1), total) if total > 1 else 1
             else:
                 parallel = min(MAX_BATCH, total) if total > 1 else 1
 
