@@ -86,13 +86,29 @@ _gen_worker_count = 0  # jobs completed by worker (for periodic cache clear)
 # `GEN_MAX_BATCH>1` explicitly to re-enable. Real concurrency on a single
 # GPU is provided by the multi-process worker pool (NUM_GEN_WORKERS), where
 # each worker has its own CUDA context and runs in parallel on the device.
-MAX_BATCH = int(os.environ.get('GEN_MAX_BATCH', '4'))
+#
+# DEFAULT IS 1 (disabled). Benchmarks (16-chunk story, GB10 + Cascade-2 vLLM
+# co-resident): NUM=4 BATCH=4 → 0.96× of main (SLOWER). NUM=1 BATCH=16 →
+# 1.07× (marginal). F5 is compute-bound on a single shared GPU, so neither
+# tensor batching nor multi-process workers buy meaningful speedup; they
+# just add IPC overhead and timeout edge cases. Best left dormant unless
+# you're serving multiple concurrent users (where NUM_GEN_WORKERS>1 still
+# helps avoid serialization across users).
+MAX_BATCH = int(os.environ.get('GEN_MAX_BATCH', '1'))
 
 # Number of F5 worker *processes* (not threads). Each process loads its own
 # F5 model on CUDA (~1-2 GB GPU each) and pulls jobs from a shared mp.Queue.
 # Multiple processes get distinct CUDA contexts and actually run in parallel
-# on the GPU, unlike multiple threads in one process.
-NUM_GEN_WORKERS = int(os.environ.get('NUM_GEN_WORKERS', '4'))
+# on the GPU, unlike multiple threads in one process. Default 1 (single
+# in-process worker, same as `main` branch) — bump for multi-user serving.
+NUM_GEN_WORKERS = int(os.environ.get('NUM_GEN_WORKERS', '1'))
+
+# F5 output gain — applied to every generated wave before returning, in both
+# the legacy single-call path and the tensor-batched path. Negative dB =
+# quieter. F5's natural output around RMS 0.1-0.2 is hot for speech and can
+# clip on louder phonemes; -3 dB pulls it back into safe headroom.
+F5_OUTPUT_GAIN_DB = float(os.environ.get('F5_OUTPUT_GAIN_DB', '-3.0'))
+F5_OUTPUT_GAIN = 10.0 ** (F5_OUTPUT_GAIN_DB / 20.0)
 
 # Multi-process generation pool state. Populated by `_start_worker_pool()`.
 _worker_pool = None  # type: WorkerPool | None
@@ -377,6 +393,10 @@ def _worker_main(worker_id, prio_q, norm_q, result_q, ref_state, device):
                 if hasattr(wav, 'detach'):
                     wav = wav.detach().to('cpu', dtype=torch.float32).numpy()
                 audio = np.asarray(wav, dtype=np.float32).flatten()
+                # Apply F5 output gain (env-driven; default -3 dB) and clip
+                # for safety. Worker inherits parent env via spawn so the
+                # F5_OUTPUT_GAIN constant is set at module-import time.
+                audio = np.clip(audio * F5_OUTPUT_GAIN, -1.0, 1.0)
                 if torch.cuda.is_available():
                     torch.cuda.synchronize()
                 result_q.put((job_id, audio, None))
@@ -399,7 +419,9 @@ def _worker_main(worker_id, prio_q, norm_q, result_q, ref_state, device):
                 dt = time.time() - t0
                 print(f"{tag} tensor-batch x{len(batch_items)} done in {dt:.2f}s ({dt/len(batch_items):.2f}s/item)", flush=True)
                 for (job_id, _t, _p), w in zip(batch_items, waves):
-                    result_q.put((job_id, np.asarray(w, dtype=np.float32).flatten(), None))
+                    audio = np.asarray(w, dtype=np.float32).flatten()
+                    audio = np.clip(audio * F5_OUTPUT_GAIN, -1.0, 1.0)
+                    result_q.put((job_id, audio, None))
         except Exception as e:
             import traceback
             tb = traceback.format_exc()
@@ -2018,6 +2040,7 @@ def main():
             if hasattr(wav, 'detach'):
                 wav = wav.detach().to('cpu', dtype=torch.float32).numpy()
             audio = np.asarray(wav, dtype=np.float32).flatten()
+            audio = np.clip(audio * F5_OUTPUT_GAIN, -1.0, 1.0)
             return [_GenResult(audio)]
 
         def generate_batch(self, texts, ref_audio=None, ref_text="",
@@ -2078,7 +2101,10 @@ def main():
 
             with ThreadPoolExecutor(max_workers=max(1, len(texts))) as ex:
                 waves = list(ex.map(_gen_one, texts))
-            return [_GenResult(np.asarray(w, dtype=np.float32).flatten()) for w in waves]
+            return [
+                _GenResult(np.clip(np.asarray(w, dtype=np.float32).flatten() * F5_OUTPUT_GAIN, -1.0, 1.0))
+                for w in waves
+            ]
 
         def generate_tensor_batch(self, texts, ref_audio=None, ref_text="",
                                   nfe_step=32, cfg_strength=2.0, speed=1.0):
@@ -2092,7 +2118,10 @@ def main():
                 self.tts, ref_file, r_text, list(texts), self.device,
                 nfe_step=nfe_step, cfg_strength=cfg_strength, speed=speed,
             )
-            return [_GenResult(np.asarray(w, dtype=np.float32).flatten()) for w in waves]
+            return [
+                _GenResult(np.clip(np.asarray(w, dtype=np.float32).flatten() * F5_OUTPUT_GAIN, -1.0, 1.0))
+                for w in waves
+            ]
 
     MODEL = _F5TtsWrapper(f5_model, ref_audio_path, REF_TEXT, DEVICE)
     # The worker passes REF_AUDIO_DATA through to MODEL.generate as
