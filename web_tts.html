@@ -739,6 +739,26 @@
           <input type="checkbox" id="inspChkTrimPauses" checked>
           <span class="tuning-val"></span>
         </div>
+        <div class="tuning-row" id="inspRowF5Speed">
+          <label id="inspLblF5Speed">Speech Rate</label>
+          <input type="range" id="inspSliderF5Speed" min="0.6" max="1.2" step="0.05" value="0.9">
+          <span class="tuning-val" id="inspValF5Speed">0.90</span>
+        </div>
+        <div class="tuning-row" id="inspRowF5Gain">
+          <label id="inspLblF5Gain">Source Gain</label>
+          <input type="range" id="inspSliderF5Gain" min="-12" max="0" step="0.5" value="-3">
+          <span class="tuning-val" id="inspValF5Gain">-3.0dB</span>
+        </div>
+        <div class="tuning-row" id="inspRowF5Cfg">
+          <label id="inspLblF5Cfg">CFG Strength</label>
+          <input type="range" id="inspSliderF5Cfg" min="0.5" max="4.0" step="0.1" value="2.0">
+          <span class="tuning-val" id="inspValF5Cfg">2.00</span>
+        </div>
+        <div class="tuning-row" id="inspRowF5Nfe">
+          <label id="inspLblF5Nfe">NFE Steps</label>
+          <input type="range" id="inspSliderF5Nfe" min="8" max="64" step="2" value="32">
+          <span class="tuning-val" id="inspValF5Nfe">32</span>
+        </div>
       </div>
       <button class="btn btn-sm" id="inspToggleRegenTuning" style="font-size:0.7rem; margin-top:0.3rem; padding:0.2rem 0.6rem;">&#9881; Tune params</button>
     </div>
@@ -2611,13 +2631,29 @@ inspToggleRegenTuning.addEventListener('click', (e) => {
     inspSliderSilenceDb.value = sliderSilenceDb.value;
     $('inspValSilenceDb').textContent = sliderSilenceDb.value + 'dB';
     inspChkTrimPauses.checked = chkTrimPauses.checked;
+    inspSliderF5Speed.value = sliderF5Speed.value;
+    $('inspValF5Speed').textContent = parseFloat(sliderF5Speed.value).toFixed(2);
+    inspSliderF5Gain.value = sliderF5Gain.value;
+    $('inspValF5Gain').textContent = parseFloat(sliderF5Gain.value).toFixed(1) + 'dB';
+    inspSliderF5Cfg.value = sliderF5Cfg.value;
+    $('inspValF5Cfg').textContent = parseFloat(sliderF5Cfg.value).toFixed(2);
+    inspSliderF5Nfe.value = sliderF5Nfe.value;
+    $('inspValF5Nfe').textContent = String(parseInt(sliderF5Nfe.value));
   }
 });
 const inspSliderSilenceDb = $('inspSliderSilenceDb');
+const inspSliderF5Speed = $('inspSliderF5Speed');
+const inspSliderF5Gain  = $('inspSliderF5Gain');
+const inspSliderF5Cfg   = $('inspSliderF5Cfg');
+const inspSliderF5Nfe   = $('inspSliderF5Nfe');
 inspSliderTemp.addEventListener('input', () => { $('inspValTemp').textContent = parseFloat(inspSliderTemp.value).toFixed(2); });
 inspSliderTopP.addEventListener('input', () => { $('inspValTopP').textContent = parseFloat(inspSliderTopP.value).toFixed(2); });
 inspSliderTopK.addEventListener('input', () => { $('inspValTopK').textContent = inspSliderTopK.value; });
 inspSliderSilenceDb.addEventListener('input', () => { $('inspValSilenceDb').textContent = inspSliderSilenceDb.value + 'dB'; });
+inspSliderF5Speed.addEventListener('input', () => { $('inspValF5Speed').textContent = parseFloat(inspSliderF5Speed.value).toFixed(2); });
+inspSliderF5Gain .addEventListener('input', () => { $('inspValF5Gain') .textContent = parseFloat(inspSliderF5Gain .value).toFixed(1) + 'dB'; });
+inspSliderF5Cfg  .addEventListener('input', () => { $('inspValF5Cfg')  .textContent = parseFloat(inspSliderF5Cfg  .value).toFixed(2); });
+inspSliderF5Nfe  .addEventListener('input', () => { $('inspValF5Nfe')  .textContent = String(parseInt(inspSliderF5Nfe.value)); });
 
 // Regenerate chunk — supports queueing multiple regens
 async function doRegenerate(idx, params) {
@@ -2734,6 +2770,10 @@ $('inspRegenerate').addEventListener('click', async (e) => {
     top_k: useInspTuning ? parseInt(inspSliderTopK.value) : parseInt(sliderTopK.value),
     trim_pauses: useInspTuning ? inspChkTrimPauses.checked : chkTrimPauses.checked,
     silence_db: useInspTuning ? parseInt(inspSliderSilenceDb.value) : parseInt(sliderSilenceDb.value),
+    f5_speed:          useInspTuning ? parseFloat(inspSliderF5Speed.value) : parseFloat(sliderF5Speed.value),
+    f5_output_gain_db: useInspTuning ? parseFloat(inspSliderF5Gain .value) : parseFloat(sliderF5Gain .value),
+    f5_cfg_strength:   useInspTuning ? parseFloat(inspSliderF5Cfg  .value) : parseFloat(sliderF5Cfg  .value),
+    f5_nfe_step:       useInspTuning ? parseInt(inspSliderF5Nfe.value)     : parseInt(sliderF5Nfe.value),
   };
 
   // Queue the regen job
