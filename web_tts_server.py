@@ -22,9 +22,11 @@ invariant is preserved.
 import argparse
 import io
 import json
+import multiprocessing as mp
 import os
 import queue
 import re
+import signal
 import struct
 import subprocess
 import sys
@@ -76,10 +78,28 @@ _gen_seq_lock = threading.Lock()
 
 
 _gen_worker_count = 0  # jobs completed by worker (for periodic cache clear)
-# Cap on how many jobs the worker batches in one F5 forward pass. Larger =
-# better aggregate throughput (more GPU parallelism) but each job's wall
-# time is bounded by the longest in the batch, so don't go too high.
-MAX_BATCH = int(os.environ.get('GEN_MAX_BATCH', '8'))
+# In-process ThreadPoolExecutor batching is DISABLED by default (MAX_BATCH=1)
+# because the F5 `infer_batch_process` ThreadPoolExecutor approach does NOT
+# actually parallelize on CUDA — multiple Python threads all submit kernels
+# to the *same default CUDA stream* and serialize on the device. The path is
+# kept here (and in `_F5TtsWrapper.generate_batch`) for experimentation; set
+# `GEN_MAX_BATCH>1` explicitly to re-enable. Real concurrency on a single
+# GPU is provided by the multi-process worker pool (NUM_GEN_WORKERS), where
+# each worker has its own CUDA context and runs in parallel on the device.
+MAX_BATCH = int(os.environ.get('GEN_MAX_BATCH', '1'))
+
+# Number of F5 worker *processes* (not threads). Each process loads its own
+# F5 model on CUDA (~1-2 GB GPU each) and pulls jobs from a shared mp.Queue.
+# Multiple processes get distinct CUDA contexts and actually run in parallel
+# on the GPU, unlike multiple threads in one process.
+NUM_GEN_WORKERS = int(os.environ.get('NUM_GEN_WORKERS', '4'))
+
+# Multi-process generation pool state. Populated by `_start_worker_pool()`.
+_worker_pool = None  # type: WorkerPool | None
+_pending = {}        # job_id -> (threading.Event, result_container)
+_pending_lock = threading.Lock()
+_job_seq_mp = 0
+_job_seq_mp_lock = threading.Lock()
 
 
 # Brief settle window after pulling the first job: gives concurrent
@@ -121,6 +141,213 @@ def _normalize_audio_arrays(results, torch_mod):
             audio = np.array(audio, dtype=np.float32)
         out.append(np.asarray(audio, dtype=np.float32).flatten())
     return out
+
+
+# ── Multi-Process Worker Pool ────────────────────────────────────────
+#
+# A worker process is the *only* place MODEL.generate() runs in the
+# multi-process build. Each worker:
+#   1. Imports torch + F5TTS, loads its own F5-TTS_v1 checkpoint on CUDA.
+#   2. Pulls (job_id, text, params) tuples from one of two mp.Queues
+#      (priority queue preferred, then normal queue).
+#   3. Reads ref_path / ref_text from a shared multiprocessing.Manager().dict
+#      so /reference uploads in the parent are visible without restart.
+#   4. Runs F5TTS.infer(...) — the single-call path, NOT the failed
+#      ThreadPoolExecutor batch path.
+#   5. Sends (job_id, audio_np_or_None, error_str_or_None) back on the
+#      result queue.
+#
+# The function is module-level (not a closure) so it can be pickled for
+# `multiprocessing.get_context("spawn").Process`. spawn (not fork) is
+# REQUIRED for CUDA — a forked process inherits CUDA state from the
+# parent and crashes; spawn re-imports torch fresh.
+
+_WORKER_SENTINEL = None  # putting this on a queue tells the worker to exit
+
+
+def _worker_main(worker_id, prio_q, norm_q, result_q, ref_state, device):
+    """Worker process entry point. Runs F5TTS.infer in a loop.
+
+    `ref_state` is a Manager().dict with keys 'ref_path' and 'ref_text'.
+    Each worker re-reads these at the start of every job, so /reference
+    uploads in the parent take effect on the next job per worker.
+    """
+    # Quiet down BrokenPipe noise on Ctrl-C and ignore SIGINT here — the
+    # parent will signal shutdown via the sentinel on the queue.
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+
+    # Linux: ask the kernel to send SIGTERM if our parent dies. Otherwise
+    # an SSH-killed parent leaves orphaned worker processes that pin GPU
+    # memory and don't exit on their own.
+    try:
+        import ctypes
+        PR_SET_PDEATHSIG = 1
+        libc = ctypes.CDLL("libc.so.6", use_errno=True)
+        libc.prctl(PR_SET_PDEATHSIG, signal.SIGTERM, 0, 0, 0)
+    except Exception:
+        pass
+
+    parent_pid = os.getppid()
+
+    tag = f"[worker-{worker_id}]"
+    print(f"{tag} loading F5...", flush=True)
+    try:
+        import torch
+        from f5_tts.api import F5TTS
+    except ImportError as e:
+        print(f"{tag} ERROR import: {e}", flush=True)
+        return
+
+    try:
+        tts = F5TTS(device=device)
+    except Exception as e:
+        print(f"{tag} ERROR loading model: {e}", flush=True)
+        return
+    print(f"{tag} ready", flush=True)
+
+    while True:
+        # Prefer priority queue (regen) over the normal queue.
+        item = None
+        try:
+            item = prio_q.get_nowait()
+        except queue.Empty:
+            pass
+        if item is None:
+            try:
+                # Block briefly on normal, then re-check priority.
+                item = norm_q.get(timeout=0.5)
+            except queue.Empty:
+                # Belt-and-suspenders parent-death check on every poll.
+                if os.getppid() != parent_pid:
+                    print(f"{tag} parent died (pid {parent_pid} → {os.getppid()}), exiting", flush=True)
+                    return
+                continue
+
+        if item is _WORKER_SENTINEL or item is None:
+            print(f"{tag} shutdown sentinel received", flush=True)
+            break
+
+        job_id, text, params = item
+        ref_path = ref_state.get('ref_path')
+        ref_text = ref_state.get('ref_text', '') or ''
+        try:
+            wav, sr, _spec = tts.infer(
+                ref_file=ref_path,
+                ref_text=ref_text,
+                gen_text=text,
+                nfe_step=int(params.get('nfe_step', 32)),
+                cfg_strength=float(params.get('cfg_strength', 2.0)),
+                speed=float(params.get('speed', 1.0)),
+                show_info=lambda *a, **k: None,
+                progress=None,
+            )
+            if hasattr(wav, 'detach'):
+                wav = wav.detach().to('cpu', dtype=torch.float32).numpy()
+            audio = np.asarray(wav, dtype=np.float32).flatten()
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+            result_q.put((job_id, audio, None))
+        except Exception as e:
+            import traceback
+            tb = traceback.format_exc()
+            print(f"{tag} job {job_id} ERROR: {e}\n{tb}", flush=True)
+            try:
+                result_q.put((job_id, None, str(e)))
+            except Exception:
+                pass
+
+
+class WorkerPool:
+    """Owner of the worker processes, the IPC queues, and shared ref state."""
+
+    def __init__(self, n, device):
+        self.n = n
+        self.device = device
+        ctx = mp.get_context('spawn')
+        self.ctx = ctx
+        self.prio_q = ctx.Queue()
+        self.norm_q = ctx.Queue()
+        self.result_q = ctx.Queue()
+        self.manager = ctx.Manager()
+        self.ref_state = self.manager.dict()
+        self.processes = []
+
+    def set_ref(self, ref_path, ref_text):
+        self.ref_state['ref_path'] = ref_path
+        self.ref_state['ref_text'] = ref_text or ''
+
+    def start(self):
+        for i in range(self.n):
+            p = self.ctx.Process(
+                target=_worker_main,
+                args=(i, self.prio_q, self.norm_q, self.result_q,
+                      self.ref_state, self.device),
+                daemon=False,  # workers handle their own signal; we shutdown explicitly
+                name=f"f5-worker-{i}",
+            )
+            p.start()
+            self.processes.append(p)
+            # Stagger so workers don't all hammer the HF cache simultaneously.
+            if i < self.n - 1:
+                time.sleep(2.0)
+
+    def submit(self, job_id, text, params, priority=False):
+        item = (job_id, text, params)
+        (self.prio_q if priority else self.norm_q).put(item)
+
+    def shutdown(self, timeout=5.0):
+        for _ in range(self.n):
+            try:
+                self.norm_q.put(_WORKER_SENTINEL)
+            except Exception:
+                pass
+        deadline = time.time() + timeout
+        for p in self.processes:
+            remaining = max(0.1, deadline - time.time())
+            p.join(timeout=remaining)
+        for p in self.processes:
+            if p.is_alive():
+                print(f"  [pool] terminating {p.name}", flush=True)
+                p.terminate()
+        for p in self.processes:
+            p.join(timeout=2.0)
+
+
+def _result_dispatcher(pool):
+    """Daemon thread: route mp result_q items to pending Events.
+
+    Each entry in `_pending` is `(threading.Event, list)` where the list is
+    appended with `(audio_np, error_str)` then the event fires.
+    """
+    while True:
+        try:
+            item = pool.result_q.get()
+        except (EOFError, OSError):
+            return
+        if item is None:
+            continue
+        job_id, audio, err = item
+        with _pending_lock:
+            slot = _pending.pop(job_id, None)
+        if slot is None:
+            print(f"  [dispatcher] orphan result for job {job_id}")
+            continue
+        ev, container = slot
+        container.append((audio, err))
+        ev.set()
+
+
+def _liveness_monitor(pool):
+    """Daemon thread: log if a worker dies. Don't crash the server."""
+    seen_dead = set()
+    while True:
+        time.sleep(5.0)
+        for p in pool.processes:
+            if not p.is_alive() and p.pid not in seen_dead:
+                seen_dead.add(p.pid)
+                print(f"  [pool] WARNING worker {p.name} (pid={p.pid}) died "
+                      f"(exit={p.exitcode}); remaining={sum(1 for x in pool.processes if x.is_alive())}",
+                      flush=True)
 
 
 def _gen_worker():
@@ -196,21 +423,38 @@ def _gen_worker():
 
 
 def _submit_generate(text, temp, top_p, top_k, priority=False):
-    """Submit a generation job and block until the worker completes it.
-    priority=True → runs before batch chunks.
-    Returns (results_list) or raises on error."""
-    global _gen_seq
+    """Submit a generation job and return (job_dict, threading.Event).
+    The event fires when audio is ready (or an error has been recorded).
+
+    Routing:
+      * If the multi-process worker pool is active, push onto its mp.Queue
+        and let the result dispatcher set the event when audio comes back.
+      * Otherwise (NUM_GEN_WORKERS=0 or pool not started), fall back to the
+        legacy in-process `_gen_queue` + `_gen_worker` thread path.
+    """
+    global _gen_seq, _job_seq_mp
+    job = {'text': text, 'temperature': temp, 'top_p': top_p, 'top_k': top_k}
+    result_event = threading.Event()
+
+    if _worker_pool is not None:
+        with _job_seq_mp_lock:
+            job_id = _job_seq_mp
+            _job_seq_mp += 1
+        container = []
+        with _pending_lock:
+            _pending[job_id] = (result_event, container)
+        # Stash so the caller (generate_chunk) can read results back into job
+        job['_mp_container'] = container
+        job['_mp_job_id'] = job_id
+        _worker_pool.submit(job_id, text, {}, priority=priority)
+        return job, result_event
+
+    # Legacy single-thread in-process path
     with _gen_seq_lock:
         seq = _gen_seq
         _gen_seq += 1
-
-    job = {'text': text, 'temperature': temp, 'top_p': top_p, 'top_k': top_k}
-    result_event = threading.Event()
     pri = 0 if priority else 1
     _gen_queue.put((pri, seq, job, result_event))
-
-    # Block until worker finishes this job — caller can poll result_event
-    # externally for cancel checks
     return job, result_event
 
 
@@ -765,10 +1009,21 @@ def generate_chunk(text, chunk_idx, total, temperature=0.5, top_p=0.95, top_k=50
             if cancel_event and cancel_event.is_set():
                 return None
 
+            # If this job came from the mp pool, the dispatcher has now
+            # appended (audio, error) into the container. Surface that into
+            # the same `_audio_arrays` / `_error` shape the rest of this
+            # function expects.
+            if '_mp_container' in job and job['_mp_container']:
+                audio, err = job['_mp_container'][0]
+                if err:
+                    job['_error'] = RuntimeError(err)
+                elif audio is not None:
+                    job['_audio_arrays'] = [np.asarray(audio, dtype=np.float32).flatten()]
+
             if '_error' in job:
                 raise job['_error']
 
-            # Worker already converted MLX arrays → numpy (thread-safe)
+            # Worker already converted tensors → numpy (thread-safe)
             all_audio = job.get('_audio_arrays', [])
 
             if not all_audio:
@@ -1002,7 +1257,14 @@ class TTSHandler(BaseHTTPRequestHandler):
             # chunks queue up in `buf` and drain as the contiguous prefix
             # fills in.
             import concurrent.futures
-            parallel = min(MAX_BATCH, total) if total > 1 else 1
+            # Parallelism cap on the SSE handler's submitter pool. With the
+            # multi-process worker pool, we want enough in-flight chunks to
+            # keep every worker process busy — otherwise the workers idle
+            # while the handler trickles jobs one at a time.
+            if _worker_pool is not None:
+                parallel = min(NUM_GEN_WORKERS, total) if total > 1 else 1
+            else:
+                parallel = min(MAX_BATCH, total) if total > 1 else 1
 
             def _process_chunk(idx, ctext):
                 t0 = time.time()
@@ -1291,8 +1553,14 @@ class TTSHandler(BaseHTTPRequestHandler):
                 _err(400, "Expected multipart/form-data with 'audio' and 'transcript' fields.")
                 return
 
-            # Reject if a generation is currently in flight (queue not drained)
-            in_flight = _gen_queue.unfinished_tasks
+            # Reject if a generation is currently in flight. With the mp
+            # pool, "in flight" = pending jobs awaiting a result; without
+            # it, the legacy in-process queue's unfinished_tasks counter.
+            if _worker_pool is not None:
+                with _pending_lock:
+                    in_flight = len(_pending)
+            else:
+                in_flight = _gen_queue.unfinished_tasks
             if in_flight > 0:
                 _err(409, f"Cannot swap voice while {in_flight} generation job(s) are in flight. Stop or wait, then retry.")
                 return
@@ -1364,6 +1632,10 @@ class TTSHandler(BaseHTTPRequestHandler):
                 if MODEL is not None:
                     MODEL.ref_path = out_path
                     MODEL.ref_text = transcript
+                # Push into the shared mp.Manager dict so worker processes
+                # see the new reference on their next job pickup.
+                if _worker_pool is not None:
+                    _worker_pool.set_ref(out_path, transcript)
 
             print(f"  Reference voice swapped: {REF_NAME} ({duration:.1f}s, transcript {len(transcript)} chars)")
 
@@ -1647,10 +1919,47 @@ def main():
     REF_NAME = os.path.basename(ref_audio_path) if ref_audio_path else ""
     print(f"Loaded F5-TTS on {DEVICE}")
 
-    # Start the single generation worker thread (only thread that touches MODEL)
-    worker = threading.Thread(target=_gen_worker, daemon=True)
-    worker.start()
-    print(f"Generation worker started (single-threaded GPU access)")
+    # ── Worker pool selection ──────────────────────────────────────────
+    # Multi-process pool (default): N processes, each with its own CUDA
+    # context for true GPU parallelism.
+    # Legacy single in-process worker (NUM_GEN_WORKERS<=0): for debugging
+    # / strict single-context behavior.
+    global _worker_pool
+    if NUM_GEN_WORKERS > 0:
+        # We've already loaded F5 once in this process to verify the
+        # checkpoint is present and downloaded. Release the underlying
+        # model so the parent doesn't hold ~2 GB of unused GPU memory
+        # (MODEL itself stays alive for ref_path / status bookkeeping).
+        try:
+            MODEL.tts = None
+            del f5_model
+        except Exception:
+            pass
+        try:
+            import gc as _gc
+            _gc.collect()
+            import torch as _torch
+            if _torch.cuda.is_available():
+                _torch.cuda.empty_cache()
+        except Exception:
+            pass
+
+        print(f"Starting {NUM_GEN_WORKERS} worker process(es) (device={DEVICE})...")
+        _worker_pool = WorkerPool(NUM_GEN_WORKERS, DEVICE)
+        _worker_pool.set_ref(ref_audio_path, REF_TEXT)
+        _worker_pool.start()
+
+        disp = threading.Thread(target=_result_dispatcher, args=(_worker_pool,),
+                                daemon=True, name='result-dispatcher')
+        disp.start()
+        live = threading.Thread(target=_liveness_monitor, args=(_worker_pool,),
+                                daemon=True, name='worker-liveness')
+        live.start()
+        print(f"Worker pool ready ({NUM_GEN_WORKERS} processes, dispatcher running)")
+    else:
+        worker = threading.Thread(target=_gen_worker, daemon=True)
+        worker.start()
+        print(f"Generation worker started (legacy single-threaded GPU access)")
 
     # Start server
     class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
@@ -1667,6 +1976,12 @@ def main():
     except KeyboardInterrupt:
         print("\nShutting down...")
         server.shutdown()
+    finally:
+        if _worker_pool is not None:
+            try:
+                _worker_pool.shutdown()
+            except Exception as e:
+                print(f"  [pool] shutdown error: {e}")
 
 
 if __name__ == "__main__":
