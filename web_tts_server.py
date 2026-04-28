@@ -82,12 +82,22 @@ _gen_worker_count = 0  # jobs completed by worker (for periodic cache clear)
 MAX_BATCH = int(os.environ.get('GEN_MAX_BATCH', '8'))
 
 
+# Brief settle window after pulling the first job: gives concurrent
+# submitters from the /generate handler's ThreadPoolExecutor a chance to
+# push their jobs onto the queue before we drain. 25 ms is negligible vs
+# the 3-7 s F5 forward pass and is the difference between batching N=1
+# and batching N=8 in the common multi-chunk case.
+GEN_BATCH_SETTLE_MS = int(os.environ.get('GEN_BATCH_SETTLE_MS', '25'))
+
+
 def _drain_same_priority(first):
     """Pull first item plus up to MAX_BATCH-1 *same-priority* jobs from the
     queue without blocking. If a different-priority job is encountered it's
     put back so the queue's priority ordering still holds."""
     batch = [first]
     target_pri = first[0]
+    if MAX_BATCH > 1 and GEN_BATCH_SETTLE_MS > 0:
+        time.sleep(GEN_BATCH_SETTLE_MS / 1000.0)
     while len(batch) < MAX_BATCH:
         try:
             nxt = _gen_queue.get_nowait()
