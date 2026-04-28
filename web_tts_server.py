@@ -76,57 +76,113 @@ _gen_seq_lock = threading.Lock()
 
 
 _gen_worker_count = 0  # jobs completed by worker (for periodic cache clear)
+# Cap on how many jobs the worker batches in one F5 forward pass. Larger =
+# better aggregate throughput (more GPU parallelism) but each job's wall
+# time is bounded by the longest in the batch, so don't go too high.
+MAX_BATCH = int(os.environ.get('GEN_MAX_BATCH', '8'))
+
+
+def _drain_same_priority(first):
+    """Pull first item plus up to MAX_BATCH-1 *same-priority* jobs from the
+    queue without blocking. If a different-priority job is encountered it's
+    put back so the queue's priority ordering still holds."""
+    batch = [first]
+    target_pri = first[0]
+    while len(batch) < MAX_BATCH:
+        try:
+            nxt = _gen_queue.get_nowait()
+        except queue.Empty:
+            break
+        if nxt[0] != target_pri:
+            _gen_queue.put(nxt)
+            break
+        batch.append(nxt)
+    return batch
+
+
+def _normalize_audio_arrays(results, torch_mod):
+    """Convert MODEL.generate(...) result list to numpy float32 mono."""
+    out = []
+    for r in results:
+        audio = r.audio
+        if hasattr(audio, 'detach'):
+            audio = audio.detach().to('cpu', dtype=torch_mod.float32).numpy()
+        elif not isinstance(audio, np.ndarray):
+            audio = np.array(audio, dtype=np.float32)
+        out.append(np.asarray(audio, dtype=np.float32).flatten())
+    return out
 
 
 def _gen_worker():
     """Dedicated worker thread — only thread that ever calls MODEL.generate().
-    On the DGX/CUDA build, PyTorch is technically thread-safer than MLX, but
-    we keep the single-worker invariant: it serializes GPU access so memory
-    growth and KV-cache reuse stay predictable, matches the original control
-    flow, and avoids any subtle issues with mid-generation tensor lifetimes.
+    On the DGX/CUDA build, PyTorch is thread-safer than MLX, so we *can*
+    batch up to MAX_BATCH same-priority jobs in a single call when MODEL
+    exposes ``generate_batch``. The single-worker invariant still holds —
+    we just process up to N jobs per pickup instead of strictly one.
     """
     import torch
     global _gen_worker_count
     print(f"  [gen_worker] started on thread {threading.current_thread().name}")
     while True:
-        _priority, _seq, job, result_event = _gen_queue.get()
-        pri_label = "REGEN" if _priority == 0 else "BATCH"
-        print(f"  [gen_worker] picked up {pri_label} job seq={_seq}")
+        first = _gen_queue.get()
+        batch = _drain_same_priority(first) if MAX_BATCH > 1 else [first]
+        n = len(batch)
+        priority = batch[0][0]
+        seqs = [b[1] for b in batch]
+        pri_label = "REGEN" if priority == 0 else "BATCH"
+        if n == 1:
+            print(f"  [gen_worker] picked up {pri_label} job seq={seqs[0]}")
+        else:
+            print(f"  [gen_worker] picked up {pri_label} ×{n} jobs seqs={seqs}")
         try:
-            results = MODEL.generate(
-                text=job['text'],
-                ref_audio=REF_AUDIO_DATA,
-                ref_text=REF_TEXT,
-                temperature=job['temperature'],
-                top_p=job['top_p'],
-                top_k=job['top_k'],
-                verbose=False,
-            )
-            # Convert torch tensors → numpy HERE in the worker thread
-            # (mirrors the original MLX→numpy pattern; harmless on CUDA but
-            # keeps tensor lifetimes inside the worker).
-            audio_arrays = []
-            for r in results:
-                audio = r.audio
-                if hasattr(audio, 'detach'):  # torch.Tensor
-                    audio = audio.detach().to('cpu', dtype=torch.float32).numpy()
-                elif not isinstance(audio, np.ndarray):
-                    audio = np.array(audio, dtype=np.float32)
-                audio_arrays.append(np.asarray(audio, dtype=np.float32).flatten())
-            if torch.cuda.is_available():
-                torch.cuda.synchronize()
+            if n > 1 and hasattr(MODEL, 'generate_batch'):
+                # Batched path — single F5 invocation runs N gen_texts in
+                # parallel via ThreadPoolExecutor under the hood.
+                texts = [b[2]['text'] for b in batch]
+                results = MODEL.generate_batch(
+                    texts,
+                    ref_audio=REF_AUDIO_DATA,
+                    ref_text=REF_TEXT,
+                )
+                if torch.cuda.is_available():
+                    torch.cuda.synchronize()
+                # Each result corresponds to one job in input order.
+                for (_, _, job, _), r in zip(batch, results):
+                    job['_audio_arrays'] = _normalize_audio_arrays([r], torch)
+            else:
+                # Single-job path (or fallback when no batch API)
+                for _, _, job, _ in batch:
+                    results = MODEL.generate(
+                        text=job['text'],
+                        ref_audio=REF_AUDIO_DATA,
+                        ref_text=REF_TEXT,
+                        temperature=job['temperature'],
+                        top_p=job['top_p'],
+                        top_k=job['top_k'],
+                        verbose=False,
+                    )
+                    job['_audio_arrays'] = _normalize_audio_arrays(results, torch)
+                if torch.cuda.is_available():
+                    torch.cuda.synchronize()
 
-            job['_audio_arrays'] = audio_arrays
-            _gen_worker_count += 1
+            _gen_worker_count += n
             if _gen_worker_count % 10 == 0 and torch.cuda.is_available():
                 torch.cuda.empty_cache()
         except Exception as e:
-            job['_error'] = e
-            print(f"  [gen_worker] ERROR: {e}")
+            # On batch failure, mark every job in the batch with the error
+            # so each waiter sees a clean failure (don't silently drop jobs).
+            for _, _, job, _ in batch:
+                if '_audio_arrays' not in job:
+                    job['_error'] = e
+            print(f"  [gen_worker] ERROR ({n}-way): {e}")
         finally:
-            result_event.set()
-            _gen_queue.task_done()
-            print(f"  [gen_worker] done with {pri_label} job seq={_seq}")
+            for _, _, _, ev in batch:
+                ev.set()
+                _gen_queue.task_done()
+            if n == 1:
+                print(f"  [gen_worker] done with {pri_label} job seq={seqs[0]}")
+            else:
+                print(f"  [gen_worker] done with {pri_label} ×{n} (seqs={seqs})")
 
 
 def _submit_generate(text, temp, top_p, top_k, priority=False):
@@ -930,64 +986,91 @@ class TTSHandler(BaseHTTPRequestHandler):
             })
 
             cancelled = False
-            for i, chunk_text in enumerate(chunks):
-                # Check for cancellation before starting each chunk
+            # Submit all chunks to the gen queue concurrently so the worker
+            # can pull a batch of same-priority jobs in one F5 forward pass.
+            # We still emit SSE events in chunk-index order — completed
+            # chunks queue up in `buf` and drain as the contiguous prefix
+            # fills in.
+            import concurrent.futures
+            parallel = min(MAX_BATCH, total) if total > 1 else 1
+
+            def _process_chunk(idx, ctext):
+                t0 = time.time()
                 if cancel_event.is_set():
-                    print(f"  [{i+1}/{total}] ⊘ Cancelled before generation")
-                    cancelled = True
-                    break
+                    return idx, None, 0.0
+                r = generate_chunk(
+                    ctext, idx, total,
+                    temperature=temperature,
+                    top_p=top_p,
+                    top_k=top_k,
+                    trim_pauses=trim_pauses,
+                    silence_db=silence_db,
+                    cancel_event=cancel_event,
+                    priority=False,
+                )
+                return idx, r, time.time() - t0
 
-                start = time.time()
-                # priority=False → batch chunks; regen jobs (priority=True)
-                # will be pulled from the queue first by the worker
-                result = generate_chunk(chunk_text, i, total,
-                                        temperature=temperature,
-                                        top_p=top_p,
-                                        top_k=top_k,
-                                        trim_pauses=trim_pauses,
-                                        silence_db=silence_db,
-                                        cancel_event=cancel_event,
-                                        priority=False)
-                gen_time = time.time() - start
+            buf = {}            # idx -> (result, gen_time)
+            next_to_send = 0
+            with concurrent.futures.ThreadPoolExecutor(max_workers=parallel) as ex:
+                futures = [ex.submit(_process_chunk, i, ct) for i, ct in enumerate(chunks)]
+                for fut in concurrent.futures.as_completed(futures):
+                    try:
+                        idx, result, gen_time = fut.result()
+                    except Exception as e:
+                        print(f"  [chunk worker] ERROR: {e}")
+                        continue
+                    buf[idx] = (result, gen_time)
 
-                # Check cancellation again after generation (may have been set during)
-                if cancel_event.is_set():
-                    print(f"  [{i+1}/{total}] ⊘ Cancelled during generation")
-                    cancelled = True
-                    break
+                    # Drain any contiguous completed chunks in order
+                    while next_to_send in buf:
+                        result, gen_time = buf.pop(next_to_send)
+                        chunk_text = chunks[next_to_send]
+                        i = next_to_send
 
-                if result:
-                    wav_bytes, duration, raw_wav_bytes, raw_duration, cuts = result
-                    # Base64 encode the WAV for SSE transport
-                    b64_audio = base64.b64encode(wav_bytes).decode('ascii')
-                    b64_raw = base64.b64encode(raw_wav_bytes).decode('ascii')
+                        if cancel_event.is_set():
+                            print(f"  [{i+1}/{total}] ⊘ Cancelled (in-order drain)")
+                            cancelled = True
+                            break
 
-                    if not self._send_sse('chunk', {
-                        'index': i,
-                        'total': total,
-                        'text': chunk_text,
-                        'audio_b64': b64_audio,
-                        'duration': round(duration, 2),
-                        'gen_time': round(gen_time, 2),
-                        'audio_raw_b64': b64_raw,
-                        'duration_raw': round(raw_duration, 2),
-                        'cuts': cuts,
-                    }):
-                        # Client disconnected
-                        print(f"  [{i+1}/{total}] ⊘ Client disconnected")
-                        cancelled = True
+                        if result:
+                            wav_bytes, duration, raw_wav_bytes, raw_duration, cuts = result
+                            b64_audio = base64.b64encode(wav_bytes).decode('ascii')
+                            b64_raw = base64.b64encode(raw_wav_bytes).decode('ascii')
+                            if not self._send_sse('chunk', {
+                                'index': i,
+                                'total': total,
+                                'text': chunk_text,
+                                'audio_b64': b64_audio,
+                                'duration': round(duration, 2),
+                                'gen_time': round(gen_time, 2),
+                                'audio_raw_b64': b64_raw,
+                                'duration_raw': round(raw_duration, 2),
+                                'cuts': cuts,
+                            }):
+                                print(f"  [{i+1}/{total}] ⊘ Client disconnected")
+                                cancelled = True
+                                break
+                            print(f"  [{i+1}/{total}] ✓ {duration:.1f}s audio in {gen_time:.1f}s | {chunk_text[:50]}...")
+                        else:
+                            if not self._send_sse('error', {
+                                'index': i,
+                                'total': total,
+                                'text': chunk_text,
+                                'message': 'Generation failed',
+                            }):
+                                cancelled = True
+                                break
+                            print(f"  [{i+1}/{total}] ✗ Failed")
+
+                        next_to_send += 1
+
+                    if cancelled:
+                        # Signal remaining in-flight chunks to bail
+                        cancel_event.set()
+                        for f in futures:
+                            f.cancel()
                         break
-                    print(f"  [{i+1}/{total}] ✓ {duration:.1f}s audio in {gen_time:.1f}s | {chunk_text[:50]}...")
-                else:
-                    if not self._send_sse('error', {
-                        'index': i,
-                        'total': total,
-                        'text': chunk_text,
-                        'message': 'Generation failed',
-                    }):
-                        cancelled = True
-                        break
-                    print(f"  [{i+1}/{total}] ✗ Failed")
 
 
             if cancelled:
@@ -1428,6 +1511,37 @@ def main():
             self.ref_path = ref_path
             self.ref_text = ref_text
             self.device = device
+            # Cache key for the prepared reference audio tensor — invalidated
+            # when ref_path changes (e.g. via /reference upload).
+            self._ref_cache_key = None
+            self._ref_audio_tensor = None
+            self._ref_audio_len = None
+
+        def _ensure_ref_tensor(self, ref_file):
+            """Lazy-load+cache the reference audio tensor for batched calls.
+            F5's internal `infer_process` reloads ref audio every call; for
+            batching we want it once, then re-use across all gen_texts."""
+            import torch
+            import torchaudio
+            from f5_tts.infer.utils_infer import target_sample_rate, hop_length
+            if self._ref_cache_key == ref_file and self._ref_audio_tensor is not None:
+                return self._ref_audio_tensor, self._ref_audio_len
+            audio, sr = torchaudio.load(ref_file)
+            if audio.shape[0] > 1:
+                audio = torch.mean(audio, dim=0, keepdim=True)
+            # Match F5's RMS normalisation logic so batched output matches single
+            target_rms = 0.1
+            rms = torch.sqrt(torch.mean(torch.square(audio)))
+            if rms < target_rms:
+                audio = audio * target_rms / rms
+            if sr != target_sample_rate:
+                resampler = torchaudio.transforms.Resample(sr, target_sample_rate)
+                audio = resampler(audio)
+            audio = audio.to(self.device)
+            self._ref_audio_tensor = audio
+            self._ref_audio_len = audio.shape[-1] // hop_length
+            self._ref_cache_key = ref_file
+            return audio, self._ref_audio_len
 
         def generate(self, text, ref_audio=None, ref_text="", temperature=0.9,
                      top_p=0.95, top_k=50, verbose=False):
@@ -1455,6 +1569,66 @@ def main():
                 wav = wav.detach().to('cpu', dtype=torch.float32).numpy()
             audio = np.asarray(wav, dtype=np.float32).flatten()
             return [_GenResult(audio)]
+
+        def generate_batch(self, texts, ref_audio=None, ref_text="",
+                           nfe_step=32, cfg_strength=2.0, speed=1.0):
+            """Generate audio for *N* gen_texts in parallel using F5's
+            underlying flow-matching model + a ThreadPoolExecutor. Each
+            text gets its own model.sample() call but they overlap on the
+            GPU, amortising prefill / kernel launch overhead.
+
+            Returns a list of [_GenResult(...)] in the same order as `texts`.
+            """
+            import torch
+            from concurrent.futures import ThreadPoolExecutor
+            from f5_tts.infer.utils_infer import (
+                target_sample_rate, hop_length, convert_char_to_pinyin,
+            )
+
+            ref_file = ref_audio if isinstance(ref_audio, str) and ref_audio else self.ref_path
+            r_text = ref_text or self.ref_text or ""
+            if not ref_file:
+                raise RuntimeError("F5-TTS requires a reference audio file path; none configured.")
+
+            audio, ref_audio_len = self._ensure_ref_tensor(ref_file)
+            target_rms = 0.1
+            rms = torch.sqrt(torch.mean(torch.square(audio)))
+            ref_text_safe = r_text + (" " if r_text and len(r_text[-1].encode("utf-8")) == 1 else "")
+
+            def _gen_one(gen_text):
+                local_speed = speed
+                if len(gen_text.encode("utf-8")) < 10:
+                    local_speed = 0.3
+                text_list = [ref_text_safe + gen_text]
+                final_text_list = convert_char_to_pinyin(text_list)
+                ref_text_len = max(len(ref_text_safe.encode("utf-8")), 1)
+                gen_text_len = len(gen_text.encode("utf-8"))
+                duration = ref_audio_len + int(ref_audio_len / ref_text_len * gen_text_len / local_speed)
+                with torch.inference_mode():
+                    generated, _ = self.tts.ema_model.sample(
+                        cond=audio,
+                        text=final_text_list,
+                        duration=duration,
+                        steps=nfe_step,
+                        cfg_strength=cfg_strength,
+                        sway_sampling_coef=-1,
+                    )
+                    generated = generated.to(torch.float32)
+                    generated = generated[:, ref_audio_len:, :]
+                    generated = generated.permute(0, 2, 1)
+                    if self.tts.mel_spec_type == "vocos":
+                        wave = self.tts.vocoder.decode(generated)
+                    elif self.tts.mel_spec_type == "bigvgan":
+                        wave = self.tts.vocoder(generated)
+                    else:
+                        wave = self.tts.vocoder.decode(generated)
+                    if rms < target_rms:
+                        wave = wave * rms / target_rms
+                    return wave.squeeze().cpu().numpy().astype(np.float32)
+
+            with ThreadPoolExecutor(max_workers=max(1, len(texts))) as ex:
+                waves = list(ex.map(_gen_one, texts))
+            return [_GenResult(np.asarray(w, dtype=np.float32).flatten()) for w in waves]
 
     MODEL = _F5TtsWrapper(f5_model, ref_audio_path, REF_TEXT, DEVICE)
     # The worker passes REF_AUDIO_DATA through to MODEL.generate as
