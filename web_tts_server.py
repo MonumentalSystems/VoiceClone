@@ -110,6 +110,13 @@ NUM_GEN_WORKERS = int(os.environ.get('NUM_GEN_WORKERS', '1'))
 F5_OUTPUT_GAIN_DB = float(os.environ.get('F5_OUTPUT_GAIN_DB', '-3.0'))
 F5_OUTPUT_GAIN = 10.0 ** (F5_OUTPUT_GAIN_DB / 20.0)
 
+# F5's `speed` parameter — multiplier on the duration estimate. <1.0 = slower
+# / longer audio (more mel frames per token); >1.0 = faster / shorter. The
+# user-perceived rate also depends on the reference clip's intrinsic tempo
+# (F5 mimics it). 0.9 is a good "slightly slower" default; 0.8 is noticeably
+# slower; 0.7 starts to sound deliberate. Above ~1.2 enunciation degrades.
+F5_SPEED = float(os.environ.get('F5_SPEED', '0.9'))
+
 # Multi-process generation pool state. Populated by `_start_worker_pool()`.
 _worker_pool = None  # type: WorkerPool | None
 _pending = {}        # job_id -> (threading.Event, result_container)
@@ -198,7 +205,9 @@ def _tb_load_ref(tts, ref_path, device):
 
 
 def _tensor_batch_infer(tts, ref_path, ref_text, texts, device,
-                        nfe_step=32, cfg_strength=2.0, speed=1.0):
+                        nfe_step=32, cfg_strength=2.0, speed=None):
+    if speed is None:
+        speed = F5_SPEED
     """Run *one* `tts.ema_model.sample()` call for N texts, then per-item
     vocode. Returns a list of numpy float32 mono waveforms (length N).
     """
@@ -386,7 +395,7 @@ def _worker_main(worker_id, prio_q, norm_q, result_q, ref_state, device):
                     gen_text=text,
                     nfe_step=int(params.get('nfe_step', 32)),
                     cfg_strength=float(params.get('cfg_strength', 2.0)),
-                    speed=float(params.get('speed', 1.0)),
+                    speed=float(params.get('speed', F5_SPEED)),
                     show_info=lambda *a, **k: None,
                     progress=None,
                 )
@@ -412,7 +421,7 @@ def _worker_main(worker_id, prio_q, norm_q, result_q, ref_state, device):
                     tts, ref_path, ref_text, texts, device,
                     nfe_step=int(params.get('nfe_step', 32)),
                     cfg_strength=float(params.get('cfg_strength', 2.0)),
-                    speed=float(params.get('speed', 1.0)),
+                    speed=float(params.get('speed', F5_SPEED)),
                 )
                 if torch.cuda.is_available():
                     torch.cuda.synchronize()
@@ -2033,7 +2042,7 @@ def main():
                 gen_text=text,
                 nfe_step=32,
                 cfg_strength=2.0,
-                speed=1.0,
+                speed=F5_SPEED,
             )
             # F5 returns a 24 kHz waveform (numpy or torch tensor depending
             # on version). Normalize to numpy float32 mono.
@@ -2044,7 +2053,8 @@ def main():
             return [_GenResult(audio)]
 
         def generate_batch(self, texts, ref_audio=None, ref_text="",
-                           nfe_step=32, cfg_strength=2.0, speed=1.0):
+                           nfe_step=32, cfg_strength=2.0, speed=None):
+            if speed is None: speed = F5_SPEED
             """Generate audio for *N* gen_texts in parallel using F5's
             underlying flow-matching model + a ThreadPoolExecutor. Each
             text gets its own model.sample() call but they overlap on the
@@ -2107,7 +2117,8 @@ def main():
             ]
 
         def generate_tensor_batch(self, texts, ref_audio=None, ref_text="",
-                                  nfe_step=32, cfg_strength=2.0, speed=1.0):
+                                  nfe_step=32, cfg_strength=2.0, speed=None):
+            if speed is None: speed = F5_SPEED
             """Real tensor-level batch: ONE `ema_model.sample()` call for
             N gen_texts. Vocoder runs per-item afterwards (batched vocoder
             in F5 has shape-handling issues; per-item is safe).
