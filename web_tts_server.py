@@ -86,7 +86,7 @@ _gen_worker_count = 0  # jobs completed by worker (for periodic cache clear)
 # `GEN_MAX_BATCH>1` explicitly to re-enable. Real concurrency on a single
 # GPU is provided by the multi-process worker pool (NUM_GEN_WORKERS), where
 # each worker has its own CUDA context and runs in parallel on the device.
-MAX_BATCH = int(os.environ.get('GEN_MAX_BATCH', '1'))
+MAX_BATCH = int(os.environ.get('GEN_MAX_BATCH', '4'))
 
 # Number of F5 worker *processes* (not threads). Each process loads its own
 # F5 model on CUDA (~1-2 GB GPU each) and pulls jobs from a shared mp.Queue.
@@ -141,6 +141,112 @@ def _normalize_audio_arrays(results, torch_mod):
             audio = np.array(audio, dtype=np.float32)
         out.append(np.asarray(audio, dtype=np.float32).flatten())
     return out
+
+
+# ── Real Tensor-Level Batching ───────────────────────────────────────
+#
+# Calls F5's flow-matching model with N gen_texts in ONE forward pass.
+# Unlike the ThreadPoolExecutor approach (which serializes on the default
+# CUDA stream), this fuses N items into a single GPU kernel launch path:
+# one transformer forward at each of `nfe_step` ODE steps for the full
+# batch. The vocoder is decoded per-item afterwards (batched vocoder has
+# known shape-handling issues in F5; per-item is safe and cheap).
+#
+# Cache is per-(tts, ref_path): the reference waveform is loaded, RMS-
+# normalised, resampled to 24 kHz, and stashed once on `tts._tb_cache`.
+
+def _tb_load_ref(tts, ref_path, device):
+    """Lazy-load+cache the prepared reference audio tensor for tensor batching."""
+    import torch
+    import torchaudio
+    from f5_tts.infer.utils_infer import target_sample_rate, hop_length
+
+    cache = getattr(tts, '_tb_cache', None)
+    if cache is not None and cache[0] == ref_path:
+        return cache[1], cache[2], cache[3]  # audio, ref_audio_len, rms
+
+    audio, sr = torchaudio.load(ref_path)
+    if audio.shape[0] > 1:
+        audio = torch.mean(audio, dim=0, keepdim=True)
+    target_rms = 0.1
+    rms = torch.sqrt(torch.mean(torch.square(audio)))
+    if rms < target_rms:
+        audio = audio * target_rms / rms
+    if sr != target_sample_rate:
+        resampler = torchaudio.transforms.Resample(sr, target_sample_rate)
+        audio = resampler(audio)
+    audio = audio.to(device)
+    ref_audio_len = audio.shape[-1] // hop_length
+    tts._tb_cache = (ref_path, audio, ref_audio_len, rms)
+    return audio, ref_audio_len, rms
+
+
+def _tensor_batch_infer(tts, ref_path, ref_text, texts, device,
+                        nfe_step=32, cfg_strength=2.0, speed=1.0):
+    """Run *one* `tts.ema_model.sample()` call for N texts, then per-item
+    vocode. Returns a list of numpy float32 mono waveforms (length N).
+    """
+    import torch
+    from f5_tts.infer.utils_infer import (
+        target_sample_rate, hop_length, convert_char_to_pinyin,
+    )
+
+    if not ref_path:
+        raise RuntimeError("F5-TTS requires a reference audio file path; none configured.")
+
+    audio, ref_audio_len, rms = _tb_load_ref(tts, ref_path, device)
+    target_rms = 0.1
+    r_text = ref_text or ""
+    ref_text_safe = r_text + (" " if r_text and len(r_text[-1].encode("utf-8")) == 1 else "")
+    ref_text_len = max(len(ref_text_safe.encode("utf-8")), 1)
+
+    N = len(texts)
+    # Per-item duration (in mel frames), matching F5's formula exactly.
+    durations = []
+    for gen_text in texts:
+        local_speed = speed
+        if len(gen_text.encode("utf-8")) < 10:
+            local_speed = 0.3
+        gen_text_len = len(gen_text.encode("utf-8"))
+        d = ref_audio_len + int(ref_audio_len / ref_text_len * gen_text_len / local_speed)
+        durations.append(d)
+    duration_t = torch.tensor(durations, dtype=torch.long, device=device)
+
+    # Build batched text list (F5 pads internally to max length).
+    text_list = [ref_text_safe + t for t in texts]
+    final_text_list = convert_char_to_pinyin(text_list)
+
+    # F5 asserts text.shape[0] == cond.shape[0]. cond is [1, T]; expand to [N, T].
+    cond = audio.expand(N, -1).contiguous() if N > 1 else audio
+
+    with torch.inference_mode():
+        generated, _ = tts.ema_model.sample(
+            cond=cond,
+            text=final_text_list,
+            duration=duration_t,
+            steps=nfe_step,
+            cfg_strength=cfg_strength,
+            sway_sampling_coef=-1,
+        )
+        generated = generated.to(torch.float32)
+        # generated shape: [N, max_dur, n_mel]. Strip ref prefix once for all.
+        generated = generated[:, ref_audio_len:, :]
+        # Each item's target output length (post-prefix) is duration[i] - ref_audio_len.
+        out_lens = (duration_t - ref_audio_len).clamp(min=1).tolist()
+
+        waves = []
+        for i in range(N):
+            mel_i = generated[i:i+1, :out_lens[i], :].permute(0, 2, 1)
+            mel_spec_type = getattr(tts, 'mel_spec_type', 'vocos')
+            if mel_spec_type == "bigvgan":
+                wave = tts.vocoder(mel_i)
+            else:
+                wave = tts.vocoder.decode(mel_i)
+            if rms < target_rms:
+                wave = wave * rms / target_rms
+            waves.append(wave.squeeze().cpu().numpy().astype(np.float32))
+
+    return waves
 
 
 # ── Multi-Process Worker Pool ────────────────────────────────────────
@@ -227,34 +333,82 @@ def _worker_main(worker_id, prio_q, norm_q, result_q, ref_state, device):
             print(f"{tag} shutdown sentinel received", flush=True)
             break
 
-        job_id, text, params = item
+        # Tensor batch: drain up to MAX_BATCH-1 more jobs after a brief
+        # settle window so concurrent submitters land in the same forward
+        # pass. Drain from prio first (preserve regen-jumps-the-line),
+        # then fall through to norm.
+        batch_items = [item]
+        if MAX_BATCH > 1:
+            if GEN_BATCH_SETTLE_MS > 0:
+                time.sleep(GEN_BATCH_SETTLE_MS / 1000.0)
+            # Drain from prio first (preserve regen-jumps-the-line),
+            # then from norm. Stop if we hit a sentinel (put back, exit
+            # loop after this batch finishes).
+            saw_sentinel = False
+            for q in (prio_q, norm_q):
+                while len(batch_items) < MAX_BATCH:
+                    try:
+                        nxt = q.get_nowait()
+                    except queue.Empty:
+                        break
+                    if nxt is _WORKER_SENTINEL or nxt is None:
+                        saw_sentinel = True
+                        break
+                    batch_items.append(nxt)
+                if saw_sentinel:
+                    break
+
         ref_path = ref_state.get('ref_path')
         ref_text = ref_state.get('ref_text', '') or ''
         try:
-            wav, sr, _spec = tts.infer(
-                ref_file=ref_path,
-                ref_text=ref_text,
-                gen_text=text,
-                nfe_step=int(params.get('nfe_step', 32)),
-                cfg_strength=float(params.get('cfg_strength', 2.0)),
-                speed=float(params.get('speed', 1.0)),
-                show_info=lambda *a, **k: None,
-                progress=None,
-            )
-            if hasattr(wav, 'detach'):
-                wav = wav.detach().to('cpu', dtype=torch.float32).numpy()
-            audio = np.asarray(wav, dtype=np.float32).flatten()
-            if torch.cuda.is_available():
-                torch.cuda.synchronize()
-            result_q.put((job_id, audio, None))
+            if len(batch_items) == 1:
+                # Single-item path: keep using the well-tested infer() path.
+                job_id, text, params = batch_items[0]
+                wav, sr, _spec = tts.infer(
+                    ref_file=ref_path,
+                    ref_text=ref_text,
+                    gen_text=text,
+                    nfe_step=int(params.get('nfe_step', 32)),
+                    cfg_strength=float(params.get('cfg_strength', 2.0)),
+                    speed=float(params.get('speed', 1.0)),
+                    show_info=lambda *a, **k: None,
+                    progress=None,
+                )
+                if hasattr(wav, 'detach'):
+                    wav = wav.detach().to('cpu', dtype=torch.float32).numpy()
+                audio = np.asarray(wav, dtype=np.float32).flatten()
+                if torch.cuda.is_available():
+                    torch.cuda.synchronize()
+                result_q.put((job_id, audio, None))
+            else:
+                texts = [it[1] for it in batch_items]
+                # Use the first item's params for the whole batch (the
+                # generate handler always passes empty {} so this is fine
+                # in practice; if heterogeneous, we'd split-by-params).
+                params = batch_items[0][2]
+                print(f"{tag} tensor-batching x{len(batch_items)} jobs", flush=True)
+                t0 = time.time()
+                waves = _tensor_batch_infer(
+                    tts, ref_path, ref_text, texts, device,
+                    nfe_step=int(params.get('nfe_step', 32)),
+                    cfg_strength=float(params.get('cfg_strength', 2.0)),
+                    speed=float(params.get('speed', 1.0)),
+                )
+                if torch.cuda.is_available():
+                    torch.cuda.synchronize()
+                dt = time.time() - t0
+                print(f"{tag} tensor-batch x{len(batch_items)} done in {dt:.2f}s ({dt/len(batch_items):.2f}s/item)", flush=True)
+                for (job_id, _t, _p), w in zip(batch_items, waves):
+                    result_q.put((job_id, np.asarray(w, dtype=np.float32).flatten(), None))
         except Exception as e:
             import traceback
             tb = traceback.format_exc()
-            print(f"{tag} job {job_id} ERROR: {e}\n{tb}", flush=True)
-            try:
-                result_q.put((job_id, None, str(e)))
-            except Exception:
-                pass
+            print(f"{tag} batch ({len(batch_items)} jobs) ERROR: {e}\n{tb}", flush=True)
+            for (job_id, _t, _p) in batch_items:
+                try:
+                    result_q.put((job_id, None, str(e)))
+                except Exception:
+                    pass
 
 
 class WorkerPool:
@@ -372,9 +526,20 @@ def _gen_worker():
         else:
             print(f"  [gen_worker] picked up {pri_label} ×{n} jobs seqs={seqs}")
         try:
-            if n > 1 and hasattr(MODEL, 'generate_batch'):
-                # Batched path — single F5 invocation runs N gen_texts in
-                # parallel via ThreadPoolExecutor under the hood.
+            if n > 1 and hasattr(MODEL, 'generate_tensor_batch'):
+                # Real tensor batch — ONE ema_model.sample() call for all N.
+                texts = [b[2]['text'] for b in batch]
+                results = MODEL.generate_tensor_batch(
+                    texts,
+                    ref_audio=REF_AUDIO_DATA,
+                    ref_text=REF_TEXT,
+                )
+                if torch.cuda.is_available():
+                    torch.cuda.synchronize()
+                for (_, _, job, _), r in zip(batch, results):
+                    job['_audio_arrays'] = _normalize_audio_arrays([r], torch)
+            elif n > 1 and hasattr(MODEL, 'generate_batch'):
+                # Legacy ThreadPoolExecutor batch path (kept for fallback).
                 texts = [b[2]['text'] for b in batch]
                 results = MODEL.generate_batch(
                     texts,
@@ -1910,6 +2075,20 @@ def main():
 
             with ThreadPoolExecutor(max_workers=max(1, len(texts))) as ex:
                 waves = list(ex.map(_gen_one, texts))
+            return [_GenResult(np.asarray(w, dtype=np.float32).flatten()) for w in waves]
+
+        def generate_tensor_batch(self, texts, ref_audio=None, ref_text="",
+                                  nfe_step=32, cfg_strength=2.0, speed=1.0):
+            """Real tensor-level batch: ONE `ema_model.sample()` call for
+            N gen_texts. Vocoder runs per-item afterwards (batched vocoder
+            in F5 has shape-handling issues; per-item is safe).
+            """
+            ref_file = ref_audio if isinstance(ref_audio, str) and ref_audio else self.ref_path
+            r_text = ref_text or self.ref_text or ""
+            waves = _tensor_batch_infer(
+                self.tts, ref_file, r_text, list(texts), self.device,
+                nfe_step=nfe_step, cfg_strength=cfg_strength, speed=speed,
+            )
             return [_GenResult(np.asarray(w, dtype=np.float32).flatten()) for w in waves]
 
     MODEL = _F5TtsWrapper(f5_model, ref_audio_path, REF_TEXT, DEVICE)
