@@ -546,6 +546,30 @@
         <span class="tuning-val"></span>
         <span class="tuning-hint">Compress silence gaps</span>
       </div>
+      <div class="tuning-row" id="rowF5Speed">
+        <label id="lblF5Speed">Speech Rate</label>
+        <input type="range" id="sliderF5Speed" min="0.6" max="1.2" step="0.05" value="0.9">
+        <span class="tuning-val" id="valF5Speed">0.90</span>
+        <span class="tuning-hint" id="hintF5Speed">&lt;1 = slower</span>
+      </div>
+      <div class="tuning-row" id="rowF5Gain">
+        <label id="lblF5Gain">Source Gain</label>
+        <input type="range" id="sliderF5Gain" min="-12" max="0" step="0.5" value="-3">
+        <span class="tuning-val" id="valF5Gain">-3.0dB</span>
+        <span class="tuning-hint" id="hintF5Gain">Lower = quieter</span>
+      </div>
+      <div class="tuning-row" id="rowF5Cfg">
+        <label id="lblF5Cfg">CFG Strength</label>
+        <input type="range" id="sliderF5Cfg" min="0.5" max="4.0" step="0.1" value="2.0">
+        <span class="tuning-val" id="valF5Cfg">2.00</span>
+        <span class="tuning-hint" id="hintF5Cfg">Higher = closer to ref</span>
+      </div>
+      <div class="tuning-row" id="rowF5Nfe">
+        <label id="lblF5Nfe">NFE Steps</label>
+        <input type="range" id="sliderF5Nfe" min="8" max="64" step="2" value="32">
+        <span class="tuning-val" id="valF5Nfe">32</span>
+        <span class="tuning-hint" id="hintF5Nfe">Higher = better/slower</span>
+      </div>
     </div>
   </div>
 
@@ -778,6 +802,10 @@ const sliderMaxChars = $('sliderMaxChars'), valMaxChars = $('valMaxChars');
 const chkTrimPauses = $('chkTrimPauses');
 
 const sliderSilenceDb = $('sliderSilenceDb'), valSilenceDb = $('valSilenceDb');
+const sliderF5Speed = $('sliderF5Speed'), valF5Speed = $('valF5Speed');
+const sliderF5Gain  = $('sliderF5Gain'),  valF5Gain  = $('valF5Gain');
+const sliderF5Cfg   = $('sliderF5Cfg'),   valF5Cfg   = $('valF5Cfg');
+const sliderF5Nfe   = $('sliderF5Nfe'),   valF5Nfe   = $('valF5Nfe');
 
 function getTuningParams() {
   return {
@@ -788,8 +816,18 @@ function getTuningParams() {
     max_chars: parseInt(sliderMaxChars.value),
     trim_pauses: chkTrimPauses.checked,
     silence_db: parseInt(sliderSilenceDb.value),
+    f5_speed: parseFloat(sliderF5Speed.value),
+    f5_output_gain_db: parseFloat(sliderF5Gain.value),
+    f5_cfg_strength: parseFloat(sliderF5Cfg.value),
+    f5_nfe_step: parseInt(sliderF5Nfe.value),
   };
 }
+
+// Live label updates
+sliderF5Speed.addEventListener('input', () => { valF5Speed.textContent = parseFloat(sliderF5Speed.value).toFixed(2); });
+sliderF5Gain .addEventListener('input', () => { valF5Gain .textContent = parseFloat(sliderF5Gain .value).toFixed(1) + 'dB'; });
+sliderF5Cfg  .addEventListener('input', () => { valF5Cfg  .textContent = parseFloat(sliderF5Cfg  .value).toFixed(2); });
+sliderF5Nfe  .addEventListener('input', () => { valF5Nfe  .textContent = String(parseInt(sliderF5Nfe.value)); });
 
 // ============================================================
 // Helpers

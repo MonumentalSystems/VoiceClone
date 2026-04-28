@@ -402,10 +402,12 @@ def _worker_main(worker_id, prio_q, norm_q, result_q, ref_state, device):
                 if hasattr(wav, 'detach'):
                     wav = wav.detach().to('cpu', dtype=torch.float32).numpy()
                 audio = np.asarray(wav, dtype=np.float32).flatten()
-                # Apply F5 output gain (env-driven; default -3 dB) and clip
-                # for safety. Worker inherits parent env via spawn so the
-                # F5_OUTPUT_GAIN constant is set at module-import time.
-                audio = np.clip(audio * F5_OUTPUT_GAIN, -1.0, 1.0)
+                # Per-request gain takes precedence over the module default.
+                if 'output_gain_db' in params:
+                    gain = 10.0 ** (float(params['output_gain_db']) / 20.0)
+                else:
+                    gain = F5_OUTPUT_GAIN
+                audio = np.clip(audio * gain, -1.0, 1.0)
                 if torch.cuda.is_available():
                     torch.cuda.synchronize()
                 result_q.put((job_id, audio, None))
@@ -427,9 +429,13 @@ def _worker_main(worker_id, prio_q, norm_q, result_q, ref_state, device):
                     torch.cuda.synchronize()
                 dt = time.time() - t0
                 print(f"{tag} tensor-batch x{len(batch_items)} done in {dt:.2f}s ({dt/len(batch_items):.2f}s/item)", flush=True)
+                if 'output_gain_db' in params:
+                    gain = 10.0 ** (float(params['output_gain_db']) / 20.0)
+                else:
+                    gain = F5_OUTPUT_GAIN
                 for (job_id, _t, _p), w in zip(batch_items, waves):
                     audio = np.asarray(w, dtype=np.float32).flatten()
-                    audio = np.clip(audio * F5_OUTPUT_GAIN, -1.0, 1.0)
+                    audio = np.clip(audio * gain, -1.0, 1.0)
                     result_q.put((job_id, audio, None))
         except Exception as e:
             import traceback
@@ -618,9 +624,13 @@ def _gen_worker():
                 print(f"  [gen_worker] done with {pri_label} ×{n} (seqs={seqs})")
 
 
-def _submit_generate(text, temp, top_p, top_k, priority=False):
+def _submit_generate(text, temp, top_p, top_k, priority=False, f5_params=None):
     """Submit a generation job and return (job_dict, threading.Event).
     The event fires when audio is ready (or an error has been recorded).
+
+    `f5_params` is an optional dict with per-request F5 overrides:
+        speed, cfg_strength, nfe_step, output_gain_db
+    These flow through to the mp worker via its `params` payload.
 
     Routing:
       * If the multi-process worker pool is active, push onto its mp.Queue
@@ -631,6 +641,7 @@ def _submit_generate(text, temp, top_p, top_k, priority=False):
     global _gen_seq, _job_seq_mp
     job = {'text': text, 'temperature': temp, 'top_p': top_p, 'top_k': top_k}
     result_event = threading.Event()
+    mp_params = dict(f5_params or {})
 
     if _worker_pool is not None:
         with _job_seq_mp_lock:
@@ -642,7 +653,7 @@ def _submit_generate(text, temp, top_p, top_k, priority=False):
         # Stash so the caller (generate_chunk) can read results back into job
         job['_mp_container'] = container
         job['_mp_job_id'] = job_id
-        _worker_pool.submit(job_id, text, {}, priority=priority)
+        _worker_pool.submit(job_id, text, mp_params, priority=priority)
         return job, result_event
 
     # Legacy single-thread in-process path
@@ -1157,7 +1168,7 @@ def _estimate_timeout(text_len):
     return min(timeout, MAX_TIMEOUT)
 
 
-def generate_chunk(text, chunk_idx, total, temperature=0.5, top_p=0.95, top_k=50, trim_pauses=True, silence_db=-40, cancel_event=None, priority=False):
+def generate_chunk(text, chunk_idx, total, temperature=0.5, top_p=0.95, top_k=50, trim_pauses=True, silence_db=-40, cancel_event=None, priority=False, f5_params=None):
     """Generate a single audio chunk with quality check, timeout, and auto-retry.
     priority=True → job jumps the queue (used for regeneration).
     Returns (wav_bytes, duration, raw_wav_bytes, raw_duration, cuts) or None."""
@@ -1175,7 +1186,7 @@ def generate_chunk(text, chunk_idx, total, temperature=0.5, top_p=0.95, top_k=50
 
             # Submit to the single-worker generation queue
             gen_start = time.time()
-            job, result_event = _submit_generate(text, temp, top_p, top_k, priority=priority)
+            job, result_event = _submit_generate(text, temp, top_p, top_k, priority=priority, f5_params=f5_params)
 
             # Wait for the worker to finish, checking cancel periodically
             should_retry = False
@@ -1375,6 +1386,10 @@ class TTSHandler(BaseHTTPRequestHandler):
                     'max_chars': MAX_CHARS,
                     'min_chunk': MIN_CHUNK,
                     'trim_pauses': True,
+                    'f5_speed': F5_SPEED,
+                    'f5_output_gain_db': F5_OUTPUT_GAIN_DB,
+                    'f5_cfg_strength': 2.0,
+                    'f5_nfe_step': 32,
                 },
                 # F5-TTS does not expose temperature/top_p/top_k via its API,
                 # so hide those rows in the frontend tuning panel.
@@ -1411,6 +1426,22 @@ class TTSHandler(BaseHTTPRequestHandler):
             min_chunk = int(data.get('min_chunk', MIN_CHUNK))
             trim_pauses = bool(data.get('trim_pauses', True))
             silence_db = float(data.get('silence_db', -40))
+
+            # F5-specific overrides; only forwarded keys survive to the worker
+            # so the wrapper / worker can fall back to module defaults if a
+            # field is missing.
+            f5_params = {}
+            for src, dst, cast in (
+                ('f5_speed',          'speed',          float),
+                ('f5_cfg_strength',   'cfg_strength',   float),
+                ('f5_nfe_step',       'nfe_step',       int),
+                ('f5_output_gain_db', 'output_gain_db', float),
+            ):
+                if src in data and data[src] is not None:
+                    try:
+                        f5_params[dst] = cast(data[src])
+                    except (TypeError, ValueError):
+                        pass
 
             # Create a cancel event for this request
             import uuid
@@ -1478,6 +1509,7 @@ class TTSHandler(BaseHTTPRequestHandler):
                     silence_db=silence_db,
                     cancel_event=cancel_event,
                     priority=False,
+                    f5_params=f5_params,
                 )
                 return idx, r, time.time() - t0
 
@@ -1577,6 +1609,19 @@ class TTSHandler(BaseHTTPRequestHandler):
             trim_pauses = bool(data.get('trim_pauses', True))
             silence_db = float(data.get('silence_db', -40))
 
+            f5_params = {}
+            for src, dst, cast in (
+                ('f5_speed',          'speed',          float),
+                ('f5_cfg_strength',   'cfg_strength',   float),
+                ('f5_nfe_step',       'nfe_step',       int),
+                ('f5_output_gain_db', 'output_gain_db', float),
+            ):
+                if src in data and data[src] is not None:
+                    try:
+                        f5_params[dst] = cast(data[src])
+                    except (TypeError, ValueError):
+                        pass
+
             print(f"  Regenerating chunk {chunk_index} (PRIORITY): temp={temperature}, top_p={top_p}, top_k={top_k}, silence_db={silence_db}")
 
             import base64
@@ -1587,7 +1632,8 @@ class TTSHandler(BaseHTTPRequestHandler):
                                     top_k=top_k,
                                     trim_pauses=trim_pauses,
                                     silence_db=silence_db,
-                                    priority=True)
+                                    priority=True,
+                                    f5_params=f5_params)
             gen_time = time.time() - start
 
             self.send_response(200)
