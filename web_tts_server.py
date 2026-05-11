@@ -20,6 +20,7 @@ invariant is preserved.
 """
 
 import argparse
+import base64
 import io
 import json
 import multiprocessing as mp
@@ -47,6 +48,7 @@ REF_NAME = ""  # display name for the active reference (filename only)
 SAMPLE_RATE = 24000
 MAX_CHARS = 375
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+MAX_CONVERT_AUDIO_BYTES = 150 * 1024 * 1024
 
 # Lock for swapping the active reference voice. Held briefly while
 # MODEL.ref_path / MODEL.ref_text are mutated; the gen worker reads
@@ -1535,7 +1537,6 @@ class TTSHandler(BaseHTTPRequestHandler):
             self.end_headers()
 
             # Send initial info (include request_id so client can cancel)
-            import base64
             self._send_sse('info', {
                 'total_chunks': total,
                 'sample_rate': SAMPLE_RATE,
@@ -1690,7 +1691,6 @@ class TTSHandler(BaseHTTPRequestHandler):
 
             print(f"  Regenerating chunk {chunk_index} (PRIORITY): temp={temperature}, top_p={top_p}, top_k={top_k}, silence_db={silence_db}")
 
-            import base64
             start = time.time()
             result = generate_chunk(chunk_text, chunk_index, total,
                                     temperature=temperature,
@@ -1747,8 +1747,6 @@ class TTSHandler(BaseHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(json.dumps({'error': 'No audio provided'}).encode())
                 return
-
-            import base64
 
             # Decode raw audio
             raw_bytes = base64.b64decode(audio_raw_b64)
@@ -1816,6 +1814,100 @@ class TTSHandler(BaseHTTPRequestHandler):
                 'duration': round(duration, 2),
             }).encode())
             print(f"  Apply-cuts: {len(cuts)} cuts, {raw_duration:.1f}s raw -> {duration:.1f}s trimmed")
+
+        elif self.path == '/convert-audio':
+            content_len = int(self.headers.get('Content-Length', 0))
+            body = self.rfile.read(content_len)
+            data = json.loads(body)
+
+            audio_b64 = data.get('audio_b64', '')
+            out_format = str(data.get('format', 'mp3')).lower()
+
+            if out_format not in ('mp3', 'ogg'):
+                self.send_response(400)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                self.wfile.write(json.dumps({'error': 'Format must be mp3 or ogg'}).encode())
+                return
+
+            if not audio_b64:
+                self.send_response(400)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                self.wfile.write(json.dumps({'error': 'No audio provided'}).encode())
+                return
+
+            try:
+                wav_bytes = base64.b64decode(audio_b64)
+            except Exception:
+                self.send_response(400)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                self.wfile.write(json.dumps({'error': 'Invalid audio data'}).encode())
+                return
+
+            if len(wav_bytes) > MAX_CONVERT_AUDIO_BYTES:
+                self.send_response(413)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                self.wfile.write(json.dumps({'error': 'Audio is too large to convert'}).encode())
+                return
+
+            if out_format == 'mp3':
+                ffmpeg_args = [
+                    'ffmpeg', '-hide_banner', '-loglevel', 'error',
+                    '-i', 'pipe:0', '-vn', '-ac', '1',
+                    '-codec:a', 'libmp3lame', '-b:a', '192k',
+                    '-f', 'mp3', 'pipe:1',
+                ]
+                mime = 'audio/mpeg'
+            else:
+                ffmpeg_args = [
+                    'ffmpeg', '-hide_banner', '-loglevel', 'error',
+                    '-i', 'pipe:0', '-vn', '-ac', '1',
+                    '-codec:a', 'libopus', '-b:a', '96k',
+                    '-f', 'ogg', 'pipe:1',
+                ]
+                mime = 'audio/ogg'
+
+            try:
+                proc = subprocess.run(
+                    ffmpeg_args,
+                    input=wav_bytes,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    check=True,
+                )
+            except FileNotFoundError:
+                self.send_response(500)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                self.wfile.write(json.dumps({'error': 'ffmpeg is required for MP3/OGG export'}).encode())
+                return
+            except subprocess.CalledProcessError as e:
+                msg = e.stderr.decode('utf-8', 'replace')[:300] or 'ffmpeg conversion failed'
+                self.send_response(500)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                self.wfile.write(json.dumps({'error': msg}).encode())
+                return
+
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            self.wfile.write(json.dumps({
+                'audio_b64': base64.b64encode(proc.stdout).decode('ascii'),
+                'mime': mime,
+                'format': out_format,
+            }).encode())
+            print(f"  Convert-audio: {len(wav_bytes)/1024:.1f} KB WAV -> {len(proc.stdout)/1024:.1f} KB {out_format.upper()}")
 
         elif self.path == '/split':
             # Lightweight text splitting — no GPU, no generation

@@ -650,8 +650,8 @@
   </div>
 
   <div class="download-section" id="downloadSection">
-    <button class="btn btn-primary" id="downloadBtn">&#11015; Download Trimmed WAV</button>
-    <button class="btn btn-sm" id="downloadRawBtn" style="margin-left:0.5rem">&#11015; Download Raw WAV</button>
+    <button class="btn btn-primary" id="downloadBtn">&#11015; Download Trimmed</button>
+    <button class="btn btn-sm" id="downloadRawBtn" style="margin-left:0.5rem">&#11015; Download Raw</button>
     <div style="margin-top:0.5rem; display:flex; align-items:center; justify-content:center; gap:0.5rem; font-size:0.78rem; color:var(--text-dim);">
       <label for="outputLevelSelect">Output Level:</label>
       <select id="outputLevelSelect" style="padding:0.2rem 0.4rem; background:var(--surface); border:1px solid var(--surface2); border-radius:4px; color:var(--text); font-size:0.78rem;">
@@ -660,6 +660,12 @@
         <option value="-6">-6 dB</option>
         <option value="-12">-12 dB</option>
         <option value="off">Off (no normalize)</option>
+      </select>
+      <label for="outputFormatSelect">Format:</label>
+      <select id="outputFormatSelect" style="padding:0.2rem 0.4rem; background:var(--surface); border:1px solid var(--surface2); border-radius:4px; color:var(--text); font-size:0.78rem;">
+        <option value="mp3">MP3</option>
+        <option value="ogg">OGG</option>
+        <option value="wav">WAV</option>
       </select>
     </div>
     <span class="char-count" style="display:block;margin-top:0.4rem" id="downloadInfo"></span>
@@ -1762,127 +1768,112 @@ function normalizeF32(f32, targetDb) {
   return out;
 }
 
-function downloadCombined() {
-  ensureAudioCtx();
-  const gapSeconds = 0.15;
-  // Build trimmed buffers (applies user cuts + auto cuts to raw audio)
-  const valid = state.chunks.filter(c => c && (c.audioRaw || c.audio) && !c.deleted);
-  const trimmedBuffers = valid.map(c => buildTrimmedAudio(c)).filter(b => b);
-  if (trimmedBuffers.length === 0) return;
-  // Use actual buffer sample rate (browser may have resampled from 24k to 48k)
-  const outRate = trimmedBuffers[0].sampleRate;
-  const gapSamples = Math.floor(outRate * gapSeconds);
-  let totalSamples = 0;
-  for (let i = 0; i < trimmedBuffers.length; i++) {
-    totalSamples += trimmedBuffers[i].length;
-    if (i < trimmedBuffers.length - 1) totalSamples += gapSamples;
-  }
-  const offline = new OfflineAudioContext(1, totalSamples, outRate);
-  let offset = 0;
-  for (let i = 0; i < trimmedBuffers.length; i++) {
-    const src = offline.createBufferSource();
-    src.buffer = trimmedBuffers[i];
-    src.connect(offline.destination);
-    src.start(offset / outRate);
-    offset += trimmedBuffers[i].length;
-    if (i < trimmedBuffers.length - 1) offset += gapSamples;
-  }
-  offline.startRendering().then(buf => {
-    const sr = buf.sampleRate;
-    let f32 = buf.getChannelData(0);
-    f32 = normalizeF32(f32, getOutputLevelDb());
-    const wavBuf = new ArrayBuffer(44 + f32.length * 2);
-    const v = new DataView(wavBuf);
-    const ws = (o, s) => { for (let i = 0; i < s.length; i++) v.setUint8(o+i, s.charCodeAt(i)); };
-    ws(0,'RIFF'); v.setUint32(4,36+f32.length*2,true); ws(8,'WAVE');
-    ws(12,'fmt '); v.setUint32(16,16,true); v.setUint16(20,1,true); v.setUint16(22,1,true);
-    v.setUint32(24,sr,true); v.setUint32(28,sr*2,true);
-    v.setUint16(32,2,true); v.setUint16(34,16,true);
-    ws(36,'data'); v.setUint32(40,f32.length*2,true);
-    for (let i = 0; i < f32.length; i++) {
-      const s = Math.max(-1,Math.min(1,f32[i]));
-      v.setInt16(44+i*2, s<0?s*0x8000:s*0x7FFF, true);
-    }
-    const blob = new Blob([wavBuf], {type:'audio/wav'});
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
-    a.download = 'voice_clone_output.wav';
-    a.click();
-    URL.revokeObjectURL(a.href);
-  });
+function getOutputFormat() {
+  const el = $('outputFormatSelect');
+  return el ? el.value : 'mp3';
 }
 
-function downloadCombinedRaw() {
-  ensureAudioCtx();
-  const gapSeconds = 0.15;
-  const valid = state.chunks.filter(c => c && !c.deleted && (c.audioRaw || c.audio));
-  if (valid.length === 0) return;
-  const firstBuf = valid[0].audioRaw || valid[0].audio;
-  const outRate = firstBuf.sampleRate;
-  const gapSamples = Math.floor(outRate * gapSeconds);
-  let totalSamples = 0;
-  for (let i = 0; i < valid.length; i++) {
-    const buf = valid[i].audioRaw || valid[i].audio;
-    totalSamples += buf.length;
-    if (i < valid.length - 1) totalSamples += gapSamples;
-  }
-  const offline = new OfflineAudioContext(1, totalSamples, outRate);
-  let offset = 0;
-  for (let i = 0; i < valid.length; i++) {
-    const buf = valid[i].audioRaw || valid[i].audio;
-    const src = offline.createBufferSource();
-    src.buffer = buf;
-    src.connect(offline.destination);
-    src.start(offset / outRate);
-    offset += buf.length;
-    if (i < valid.length - 1) offset += gapSamples;
-  }
-  offline.startRendering().then(buf => {
-    const sr = buf.sampleRate;
-    let f32 = buf.getChannelData(0);
-    f32 = normalizeF32(f32, getOutputLevelDb());
-    const wavBuf = new ArrayBuffer(44 + f32.length * 2);
-    const v = new DataView(wavBuf);
-    const ws = (o, s) => { for (let i = 0; i < s.length; i++) v.setUint8(o+i, s.charCodeAt(i)); };
-    ws(0,'RIFF'); v.setUint32(4,36+f32.length*2,true); ws(8,'WAVE');
-    ws(12,'fmt '); v.setUint32(16,16,true); v.setUint16(20,1,true); v.setUint16(22,1,true);
-    v.setUint32(24,sr,true); v.setUint32(28,sr*2,true);
-    v.setUint16(32,2,true); v.setUint16(34,16,true);
-    ws(36,'data'); v.setUint32(40,f32.length*2,true);
-    for (let i = 0; i < f32.length; i++) {
-      const s = Math.max(-1,Math.min(1,f32[i]));
-      v.setInt16(44+i*2, s<0?s*0x8000:s*0x7FFF, true);
-    }
-    const blob = new Blob([wavBuf], {type:'audio/wav'});
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
-    a.download = 'voice_clone_output_raw.wav';
-    a.click();
-    URL.revokeObjectURL(a.href);
-  });
+function mimeForAudioFormat(format) {
+  if (format === 'mp3') return 'audio/mpeg';
+  if (format === 'ogg') return 'audio/ogg';
+  return 'audio/wav';
 }
 
-function downloadAudioBuffer(audioBuffer, filename) {
-  const f32 = audioBuffer.getChannelData(0);
-  const sr = audioBuffer.sampleRate;
-  const wavBuf = new ArrayBuffer(44 + f32.length * 2);
-  const v = new DataView(wavBuf);
-  const ws = (o, s) => { for (let i = 0; i < s.length; i++) v.setUint8(o+i, s.charCodeAt(i)); };
-  ws(0,'RIFF'); v.setUint32(4,36+f32.length*2,true); ws(8,'WAVE');
-  ws(12,'fmt '); v.setUint32(16,16,true); v.setUint16(20,1,true); v.setUint16(22,1,true);
-  v.setUint32(24,sr,true); v.setUint32(28,sr*2,true);
-  v.setUint16(32,2,true); v.setUint16(34,16,true);
-  ws(36,'data'); v.setUint32(40,f32.length*2,true);
-  for (let i = 0; i < f32.length; i++) {
-    const s = Math.max(-1,Math.min(1,f32[i]));
-    v.setInt16(44+i*2, s<0?s*0x8000:s*0x7FFF, true);
-  }
-  const blob = new Blob([wavBuf], {type:'audio/wav'});
+function withAudioExtension(filename, format) {
+  return filename.replace(/\.(wav|mp3|ogg)$/i, `.${format}`);
+}
+
+function downloadBlob(blob, filename) {
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
   a.download = filename;
   a.click();
   URL.revokeObjectURL(a.href);
+}
+
+async function convertWavBlobForDownload(wavBlob, format) {
+  if (format === 'wav') return wavBlob;
+  const wavB64 = await blobToBase64(wavBlob);
+  const res = await fetch('/convert-audio', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ audio_b64: wavB64, format })
+  });
+  const data = await res.json();
+  if (!res.ok || data.error) {
+    throw new Error(data.error || `Could not convert audio to ${format.toUpperCase()}`);
+  }
+  return base64ToBlob(data.audio_b64, data.mime || mimeForAudioFormat(format));
+}
+
+async function downloadWavBlob(wavBlob, filename) {
+  const format = getOutputFormat();
+  try {
+    const blob = await convertWavBlobForDownload(wavBlob, format);
+    downloadBlob(blob, withAudioExtension(filename, format));
+  } catch (e) {
+    console.error(e);
+    alert(e.message || 'Audio conversion failed.');
+  }
+}
+
+function renderJoinedBuffers(buffers, gapSeconds = 0.15) {
+  if (buffers.length === 0) return Promise.resolve(null);
+  const outRate = buffers[0].sampleRate;
+  const gapSamples = Math.floor(outRate * gapSeconds);
+  let totalSamples = 0;
+  for (let i = 0; i < buffers.length; i++) {
+    totalSamples += buffers[i].length;
+    if (i < buffers.length - 1) totalSamples += gapSamples;
+  }
+  const offline = new OfflineAudioContext(1, totalSamples, outRate);
+  let offset = 0;
+  for (let i = 0; i < buffers.length; i++) {
+    const src = offline.createBufferSource();
+    src.buffer = buffers[i];
+    src.connect(offline.destination);
+    src.start(offset / outRate);
+    offset += buffers[i].length;
+    if (i < buffers.length - 1) offset += gapSamples;
+  }
+  return offline.startRendering();
+}
+
+async function downloadCombined() {
+  ensureAudioCtx();
+  // Build trimmed buffers (applies user cuts + auto cuts to raw audio)
+  const valid = state.chunks.filter(c => c && (c.audioRaw || c.audio) && !c.deleted);
+  const trimmedBuffers = valid.map(c => buildTrimmedAudio(c)).filter(b => b);
+  if (trimmedBuffers.length === 0) return;
+  const buf = await renderJoinedBuffers(trimmedBuffers);
+  if (!buf) return;
+  const normalized = normalizedCopy(buf, getOutputLevelDb());
+  await downloadWavBlob(audioBufferToWavBlob(normalized), 'voice_clone_output.wav');
+}
+
+async function downloadCombinedRaw() {
+  ensureAudioCtx();
+  const valid = state.chunks.filter(c => c && !c.deleted && (c.audioRaw || c.audio));
+  if (valid.length === 0) return;
+  const rawBuffers = valid.map(c => c.audioRaw || c.audio);
+  const buf = await renderJoinedBuffers(rawBuffers);
+  if (!buf) return;
+  const normalized = normalizedCopy(buf, getOutputLevelDb());
+  await downloadWavBlob(audioBufferToWavBlob(normalized), 'voice_clone_output_raw.wav');
+}
+
+function normalizedCopy(audioBuffer, targetDb) {
+  const f32 = audioBuffer.getChannelData(0);
+  const outF32 = normalizeF32(f32, targetDb);
+  if (outF32 === f32) return audioBuffer;
+  ensureAudioCtx();
+  const outBuf = state.audioCtx.createBuffer(1, outF32.length, audioBuffer.sampleRate);
+  outBuf.getChannelData(0).set(outF32);
+  return outBuf;
+}
+
+async function downloadAudioBuffer(audioBuffer, filename) {
+  await downloadWavBlob(audioBufferToWavBlob(audioBuffer), filename);
 }
 
 // ============================================================
