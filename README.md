@@ -11,13 +11,24 @@ Runs on Apple Silicon (MPS), NVIDIA (CUDA), and CPU.
 
 ```bash
 ./serve.sh                  # Apple Silicon / CPU (auto-picks mps > cpu)
-./serve-dgx.sh              # NVIDIA CUDA (DGX, workstation, etc.)
+./serve-dgx.sh              # NVIDIA CUDA (DGX, workstation, etc.; default port 8766)
 ```
 
-Both open `http://localhost:8765` once the model is loaded. The repo ships
-with a public-domain LibriVox reference voice (~9s of *The Raven* read by
-Chris Goringe), so it works out of the box — no recording required to try
-it out.
+`serve.sh` listens on `http://localhost:8765`; `serve-dgx.sh` listens on
+`http://localhost:8766` by default. The repo ships with a public-domain
+LibriVox reference voice (~9s of *The Raven* read by Chris Goringe), so it
+works out of the box — no recording required to try it out.
+
+On `dgx-00`, the CUDA server is installed as a systemd service:
+
+```bash
+sudo systemctl status voiceclone.service
+sudo systemctl restart voiceclone.service
+journalctl -u voiceclone.service -f
+```
+
+The service binds to `0.0.0.0:8766`, so it is reachable on the machine's
+LAN address as well as `localhost`.
 
 To use your own voice instead, see [SETUP.md](SETUP.md).
 
@@ -44,6 +55,12 @@ To use your own voice instead, see [SETUP.md](SETUP.md).
 - `ffmpeg`, `sox` — `brew install ffmpeg sox` (Mac) / your distro's package manager
 - For Apple Silicon: macOS 14+
 - For CUDA: PyTorch CUDA wheels (`serve-dgx.sh` defaults to the cu130 nightly index; override with `TORCH_INDEX=…`)
+
+On Ubuntu/DGX:
+
+```bash
+sudo apt-get install ffmpeg sox
+```
 
 The first launch downloads the F5-TTS_v1 model (~1.5 GB) into the HuggingFace cache.
 

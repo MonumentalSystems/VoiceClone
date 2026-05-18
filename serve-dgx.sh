@@ -4,7 +4,7 @@
 # Usage: ./serve-dgx.sh [options]
 #
 # Options:
-#   --port N        Port to listen on (default: 8765)
+#   --port N        Port to listen on (default: 8766)
 #   --model NAME    HF model id (default: F5-TTS — informational only;
 #                   F5TTS() always loads the default F5-TTS_v1 checkpoint)
 #   --ref FILE      Reference audio file (default: reference_clean.wav)
@@ -19,7 +19,7 @@ cd "$(dirname "$0")"
 # uv lives at ~/.local/bin; non-interactive shells skip ~/.bashrc PATH setup.
 export PATH="$HOME/.local/bin:$PATH"
 
-PORT=8765
+PORT=8766
 MODEL="F5-TTS"
 REF="reference_clean.wav"
 TRANSCRIPT="transcript.txt"
