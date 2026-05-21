@@ -1654,6 +1654,146 @@ class TTSHandler(BaseHTTPRequestHandler):
             with _cancel_lock:
                 _cancel_events.pop(request_id, None)
 
+        elif self.path == '/tts_stream':
+            # Lean SSE streaming endpoint. Reuses the exact same split +
+            # generation pipeline as /generate (split_text, the worker
+            # queue via generate_chunk, the configured reference voice) but
+            # emits a minimal SSE payload suitable for a hub-proxied
+            # read-aloud client — no raw audio, no cuts, no per-chunk text.
+            content_len = int(self.headers.get('Content-Length', 0))
+            body = self.rfile.read(content_len)
+            data = json.loads(body)
+            text = data.get('text', '')
+
+            if not text.strip():
+                self.send_response(400)
+                self.send_header('Content-Type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({'error': 'No text provided'}).encode())
+                return
+
+            # Proven low-latency tuning (measured ~<2s to first 7–10s of audio):
+            # small 100–150 char chunks mean the first chunk synthesizes almost
+            # immediately and streams while the rest generate. F5 ignores
+            # temperature/top_p/top_k. All overridable via the request body.
+            temperature = 0.5
+            top_p = 0.95
+            top_k = 50
+            max_chars = int(data.get('max_chars', 150))
+            min_chunk = int(data.get('min_chunk', 100))
+            trim_pauses = bool(data.get('trim_pauses', True))
+            silence_db = float(data.get('silence_db', -40.0))
+            f5_params = {
+                'speed': float(data.get('f5_speed', 0.90)),
+                'cfg_strength': float(data.get('f5_cfg_strength', 2.00)),
+                'nfe_step': int(data.get('f5_nfe_step', 32)),
+                'output_gain_db': float(data.get('f5_output_gain_db', -3.0)),
+            }
+
+            # Create a cancel event for this request (and cancel any prior).
+            import uuid
+            request_id = data.get('request_id', str(uuid.uuid4()))
+            cancel_event = threading.Event()
+            with _cancel_lock:
+                for rid, evt in list(_cancel_events.items()):
+                    evt.set()
+                _cancel_events.clear()
+                _cancel_events[request_id] = cancel_event
+
+            chunks = split_text(text, max_chars=max_chars, min_chunk=min_chunk)
+            total = len(chunks)
+
+            print(f"  [tts_stream] Request ID: {request_id} | {total} chunk(s)")
+
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/event-stream')
+            self.send_header('Cache-Control', 'no-cache')
+            self.send_header('Connection', 'keep-alive')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+
+            self._send_sse('info', {
+                'total': total,
+                'sample_rate': SAMPLE_RATE,
+            })
+
+            cancelled = False
+            import concurrent.futures
+            if _worker_pool is not None:
+                parallel = min(max(NUM_GEN_WORKERS, 1) * max(MAX_BATCH, 1), total) if total > 1 else 1
+            else:
+                parallel = min(MAX_BATCH, total) if total > 1 else 1
+
+            def _process_chunk_lean(idx, ctext):
+                if cancel_event.is_set():
+                    return idx, None
+                r = generate_chunk(
+                    ctext, idx, total,
+                    temperature=temperature,
+                    top_p=top_p,
+                    top_k=top_k,
+                    trim_pauses=trim_pauses,
+                    silence_db=silence_db,
+                    cancel_event=cancel_event,
+                    priority=False,
+                    f5_params=f5_params,
+                )
+                return idx, r
+
+            buf = {}            # idx -> result
+            next_to_send = 0
+            with concurrent.futures.ThreadPoolExecutor(max_workers=parallel) as ex:
+                futures = [ex.submit(_process_chunk_lean, i, ct) for i, ct in enumerate(chunks)]
+                for fut in concurrent.futures.as_completed(futures):
+                    try:
+                        idx, result = fut.result()
+                    except Exception as e:
+                        print(f"  [tts_stream chunk worker] ERROR: {e}")
+                        continue
+                    buf[idx] = result
+
+                    # Drain any contiguous completed chunks in order.
+                    while next_to_send in buf:
+                        result = buf.pop(next_to_send)
+                        i = next_to_send
+
+                        if cancel_event.is_set():
+                            cancelled = True
+                            break
+
+                        if result:
+                            wav_bytes = result[0]
+                            b64_audio = base64.b64encode(wav_bytes).decode('ascii')
+                            if not self._send_sse('chunk', {
+                                'index': i,
+                                'total': total,
+                                'audio_b64': b64_audio,
+                            }):
+                                print(f"  [tts_stream] [{i+1}/{total}] client disconnected")
+                                cancelled = True
+                                break
+                        else:
+                            if not self._send_sse('error', {
+                                'index': i,
+                                'message': 'Generation failed',
+                            }):
+                                cancelled = True
+                                break
+
+                        next_to_send += 1
+
+                    if cancelled:
+                        cancel_event.set()
+                        for f in futures:
+                            f.cancel()
+                        break
+
+            if not cancelled:
+                self._send_sse('done', {'total': total})
+
+            with _cancel_lock:
+                _cancel_events.pop(request_id, None)
+
         elif self.path == '/regenerate':
             content_len = int(self.headers.get('Content-Length', 0))
             body = self.rfile.read(content_len)

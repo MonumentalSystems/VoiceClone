@@ -46,6 +46,14 @@ request bodies (silently ignored) for protocol stability.
   - Periodic `torch.cuda.empty_cache()` every 10 jobs (no-op on MPS/CPU).
 - **SSE streaming** for batch generation (`/generate`) — streams `info`
   (with `chunk_texts`), `chunk`, `error`, `done` events.
+- **Lean SSE streaming** (`/tts_stream`) — same split + generation pipeline as
+  `/generate` but a minimal payload for a hub-proxied read-aloud client:
+  `info` {total, sample_rate} → `chunk` {index, total, audio_b64} → `done`
+  (no raw audio / cuts / per-chunk text). Defaults to low-latency tuning
+  (100–150 char chunks, speed 0.90, cfg_strength 2.0, nfe_step 32, gain −3 dB),
+  all overridable per request, so the first chunk streams in ~2s warm. Consumed
+  by the monumental-dashboard hub (`/api/ai/speak-stream`); VoiceClone stays
+  LAN-private — only the hub talks to it.
 - **Synchronous regen** (`/regenerate`) — returns JSON with the regenerated
   chunk (also used by resume).
 - **Text splitting** (`/split`) — lightweight text-only endpoint, no GPU;
