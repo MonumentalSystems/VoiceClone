@@ -2077,6 +2077,121 @@ class TTSHandler(BaseHTTPRequestHandler):
                 'total': len(chunks),
             }).encode())
 
+        elif self.path == '/segment':
+            # WO-1 (batch TTS) — server-side segmentation helper. Plans
+            # synthesis segments using the daemon's own chunking (split_text),
+            # so a batch driver (Hyades' IBatchTtsJobGrain) need not replicate
+            # F5-TTS's length heuristics. Text-only, no GPU. Mirrors /split but
+            # returns indexed {index, text} objects — the shape the job grain
+            # stores as its durable segment plan.
+            content_len = int(self.headers.get('Content-Length', 0))
+            body = self.rfile.read(content_len)
+            data = json.loads(body)
+            text = data.get('text', '')
+
+            if not text.strip():
+                self.send_response(400)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                self.wfile.write(json.dumps({'error': 'No text provided'}).encode())
+                return
+
+            # Accept both camelCase (work-order spec) and snake_case forms.
+            max_chars = int(data.get('maxChars', data.get('max_chars', MAX_CHARS)))
+            min_chunk = int(data.get('minChunk', data.get('min_chunk', MIN_CHUNK)))
+            chunks = split_text(text, max_chars=max_chars, min_chunk=min_chunk)
+            segments = [{'index': i, 'text': c} for i, c in enumerate(chunks)]
+
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            self.wfile.write(json.dumps({
+                'segments': segments,
+                'total': len(segments),
+            }).encode())
+
+        elif self.path == '/tts/segment':
+            # WO-3 (batch TTS) — per-segment synthesis primitive for
+            # server-driven batch narration. Synthesizes exactly ONE
+            # pre-planned segment and returns its audio inline (base64). The
+            # Hyades batch job grain calls this once per segment so it can
+            # checkpoint / pause / yield at segment boundaries.
+            #
+            # Idempotent on (job_id, index): the endpoint holds no accumulating
+            # daemon state, so re-calling the same segment (crash-recovery
+            # resume, WO-7) simply re-synthesizes and the latest result is
+            # authoritative — "re-synthesizing overwrites". Bytes are NOT cached
+            # daemon-side (storage stays Hyades-side per the MVP scope); memory
+            # stays bounded to one segment's worth, mirroring /regenerate.
+            content_len = int(self.headers.get('Content-Length', 0))
+            body = self.rfile.read(content_len)
+            data = json.loads(body)
+            job_id = data.get('job_id')   # opaque handle, for logging / idempotency intent
+            text = data.get('text', '')
+
+            def _seg_err(code, msg):
+                self.send_response(code)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                self.wfile.write(json.dumps({'error': msg, 'index': data.get('index')}).encode())
+
+            if not text.strip():
+                _seg_err(400, 'No text provided')
+                return
+            try:
+                index = int(data.get('index', 0))
+            except (TypeError, ValueError):
+                _seg_err(400, 'index must be an integer')
+                return
+
+            trim_pauses = bool(data.get('trim_pauses', True))
+            silence_db = float(data.get('silence_db', -40.0))
+            # Read-aloud profile defaults (match /tts_stream); all overridable.
+            f5_params = {
+                'speed':          float(data.get('f5_speed', 0.90)),
+                'cfg_strength':   float(data.get('f5_cfg_strength', 2.00)),
+                'nfe_step':       int(data.get('f5_nfe_step', 32)),
+                'output_gain_db': float(data.get('f5_output_gain_db', -3.0)),
+            }
+
+            label = f"{job_id}#{index}" if job_id else f"#{index}"
+            print(f"  [tts/segment] {label}: {len(text)} chars")
+
+            # priority=False → enters the worker queue at batch priority (1), so
+            # interactive regen/TTS (priority 0) jumps ahead. This is the
+            # daemon-side half of the design's fill-idle yielding.
+            start = time.time()
+            result = generate_chunk(
+                text, index, index + 1,
+                trim_pauses=trim_pauses,
+                silence_db=silence_db,
+                priority=False,
+                f5_params=f5_params,
+            )
+            gen_time = time.time() - start
+
+            if result:
+                wav_bytes, duration, _raw, _raw_dur, _cuts = result
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                self.wfile.write(json.dumps({
+                    'job_id': job_id,
+                    'index': index,
+                    'audio_b64': base64.b64encode(wav_bytes).decode('ascii'),
+                    'audio_ms': int(round(duration * 1000)),
+                    'sample_rate': SAMPLE_RATE,
+                    'gen_time': round(gen_time, 2),
+                }).encode())
+                print(f"  [tts/segment] {label} ✓ {duration:.1f}s audio in {gen_time:.1f}s")
+            else:
+                _seg_err(500, 'Segment synthesis failed')
+                print(f"  [tts/segment] {label} ✗ failed")
+
         elif self.path.startswith('/transcribe'):
             # Parse optional ?model=... query param.
             from urllib.parse import urlparse, parse_qs
