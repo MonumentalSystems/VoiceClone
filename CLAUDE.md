@@ -58,6 +58,23 @@ request bodies (silently ignored) for protocol stability.
   chunk (also used by resume).
 - **Text splitting** (`/split`) — lightweight text-only endpoint, no GPU;
   returns `{ chunks, total }`.
+- **Batch TTS work-order endpoints** (server-driven, durable narration —
+  Hyades' `IBatchTtsJobGrain`; see `~/hyades/docs/TTS_BATCH_DESIGN.md` §4).
+  These are the MVP daemon floor (WO-1 + WO-3); job durability, storage, and
+  abort stay Hyades-side for now.
+  - **Segmentation helper** (`POST /segment`, WO-1) — text-only, no GPU.
+    `{ text, maxChars?, minChunk? }` → `{ segments: [{index, text}], total }`.
+    Same `split_text` chunking as `/split`, reshaped into the indexed segment
+    plan the job grain stores. Accepts camelCase or snake_case knobs.
+  - **Per-segment synthesis** (`POST /tts/segment`, WO-3) — synthesizes one
+    pre-planned segment. `{ job_id?, index, text, f5_speed?, f5_cfg_strength?,
+    f5_nfe_step?, f5_output_gain_db?, trim_pauses?, silence_db? }` →
+    `{ job_id, index, audio_b64, audio_ms, sample_rate, gen_time }`.
+    Idempotent on `(job_id, index)` — holds no accumulating daemon state, so a
+    re-call (crash-recovery resume) just re-synthesizes; bytes are never cached
+    daemon-side (memory bounded to one segment, like `/regenerate`). Enters the
+    worker queue at batch priority (1), so interactive regen/TTS jumps ahead.
+    Defaults mirror the `/tts_stream` read-aloud profile; all overridable.
 - **Apply cuts** (`/apply-cuts`) — applies user-modified cuts to raw audio,
   returns processed WAV.
 - **Cancel** (`/cancel`) — sets per-request `threading.Event` checked every
